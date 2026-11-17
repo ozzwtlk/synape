@@ -1,0 +1,271 @@
+import { describe, it, expect } from 'vitest';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { foldEvents, initialState, type ModelProfile, type RunState } from '@synape/core';
+import { Engine } from '../src/engine.ts';
+import { EventStore } from '../src/store.ts';
+import { ScriptedAdapter, isPlan, isReview, isSynth, plannedTask, type Script } from './fakes.ts';
+
+const MODELS: Omit<ModelProfile, 'available'>[] = [
+  { id: 'a:light', provider: 'a', model: 'light', label: 'A light', billing: 'subscription', tier: 1, contextWindow: 200000, skill: { analysis: 0.6, review: 0.6, planning: 0.6, writing: 0.6, coding: 0.6 }, ruPer1kTokens: 1, latencyFactor: 1 },
+  { id: 'a:strong', provider: 'a', model: 'strong', label: 'A strong', billing: 'subscription', tier: 3, contextWindow: 200000, skill: { analysis: 0.95, review: 0.95, planning: 0.95, writing: 0.95, coding: 0.95 }, ruPer1kTokens: 5, latencyFactor: 1 },
+  { id: 'b:mid', provider: 'b', model: 'mid', label: 'B mid', billing: 'subscription', tier: 2, contextWindow: 200000, skill: { analysis: 0.85, review: 0.85, planning: 0.8, writing: 0.8, coding: 0.9 }, ruPer1kTokens: 2, latencyFactor: 1 },
+];
+
+function setup(script: Script, dir = mkdtempSync(join(tmpdir(), 'synape-test-'))) {
+  const store = new EventStore(join(dir, 'db.sqlite'));
+  const a = new ScriptedAdapter('a', script);
+  const b = new ScriptedAdapter('b', script);
+  const engine = new Engine({ store, adapters: [a, b], dataDir: dir, models: MODELS });
+  return { engine, store, a, b, dir };
+}
+
+function waitFor(engine: Engine, runId: string, pred: (s: RunState) => boolean, ms = 8000): Promise<RunState> {
+  return new Promise((ok, fail) => {
+    const check = () => {
+      const s = engine.state(runId);
+      if (pred(s)) {
+        unsub();
+        clearTimeout(t);
+        ok(s);
+        return true;
+      }
+      return false;
+    };
+    const unsub = engine.store.subscribe(runId, () => setImmediate(check));
+    const t = setTimeout(() => {
+      unsub();
+      fail(new Error(`timeout; state: ${JSON.stringify(Object.values(engine.state(runId).tasks).map((t) => [t.title, t.status, t.statusReason]))}`));
+    }, ms);
+    if (check()) return;
+  });
+}
+
+const done = (s: RunState) => ['completed', 'failed', 'cancelled'].includes(s.run.status);
+
+describe('engine', () => {
+  it('plans, runs dependencies in order, parallelizes independent tasks and synthesizes', async () => {
+    const order: string[] = [];
+    const { engine } = setup((spec) => {
+      if (isPlan(spec)) return { structured: { summary: 'plan', reply: 'ok', tasks: [plannedTask('x'), plannedTask('y'), plannedTask('z', { deps: ['x', 'y'] })] } };
+      if (isSynth(spec)) return { text: '## Summary\nall good' };
+      const k = spec.prompt.match(/## Your task: Task (\w)/)?.[1] ?? '?';
+      order.push(`start ${k}`);
+      return { text: `## Summary\nresult ${k}`, delayMs: 30 };
+    });
+    await engine.init();
+    const runId = engine.createRun({ objective: 'test objective', workspace: process.cwd() });
+    const s = await waitFor(engine, runId, done);
+    expect(s.run.status).toBe('completed');
+    const z = Object.values(s.tasks).find((t) => t.title === 'Task z')!;
+    const x = Object.values(s.tasks).find((t) => t.title === 'Task x')!;
+    const y = Object.values(s.tasks).find((t) => t.title === 'Task y')!;
+    expect(z.startedAt!).toBeGreaterThanOrEqual(Math.max(x.endedAt!, y.endedAt!));
+    // x and y overlapped (parallel)
+    expect(x.startedAt!).toBeLessThan(y.endedAt!);
+    expect(y.startedAt!).toBeLessThan(x.endedAt!);
+    expect(s.run.finalArtifactId).toBeTruthy();
+    // z received dependency summaries, not full history
+    expect(order.at(-1)).toBe('start z');
+  });
+
+  it('independent review rejects, author revises, then passes; reviewer differs from author', async () => {
+    let reviews = 0;
+    const { engine } = setup((spec) => {
+      if (isPlan(spec)) return { structured: { summary: 'p', reply: 'ok', tasks: [plannedTask('w', { verification: 'review', criticality: 3 })] } };
+      if (isReview(spec)) {
+        reviews++;
+        return { structured: reviews === 1 ? { verdict: 'revise', confidence: 0.8, summary: 'missing units', issues: [{ severity: 'major', description: 'no units' }] } : { verdict: 'pass', confidence: 0.9, summary: 'ok now', issues: [] } };
+      }
+      if (isSynth(spec)) return { text: '## Summary\ns' };
+      return { text: spec.prompt.includes('missing units') ? '## Summary\nfixed with units' : '## Summary\nfirst' };
+    });
+    await engine.init();
+    const runId = engine.createRun({ objective: 'review test', workspace: process.cwd() });
+    const s = await waitFor(engine, runId, done);
+    const w = Object.values(s.tasks).find((t) => t.title === 'Task w')!;
+    expect(w.verified).toBe(true);
+    expect(w.attempts).toBe(2);
+    expect(w.reviewIds).toHaveLength(2);
+    const verdicts = w.reviewIds.map((r) => s.reviews[r]);
+    expect(verdicts.map((v) => v.verdict)).toEqual(['revise', 'pass']);
+    w.agentIds.forEach((authorId, i) => {
+      const author = s.agents[authorId];
+      const reviewer = s.agents[verdicts[i].reviewerAgentId];
+      expect(reviewer.id).not.toBe(author.id);
+      // other model family preferred when available
+      expect(reviewer.provider).not.toBe(author.provider);
+    });
+  });
+
+  it('preserves unresolved disagreement instead of forcing consensus', async () => {
+    const { engine } = setup((spec) => {
+      if (isPlan(spec)) return { structured: { summary: 'p', reply: 'ok', tasks: [plannedTask('d', { verification: 'review' })] } };
+      if (isReview(spec)) return { structured: { verdict: 'revise', confidence: 0.7, summary: 'still wrong', issues: [] } };
+      if (isSynth(spec)) return { text: '## Summary\ns' };
+      return { text: '## Summary\nclaim' };
+    });
+    await engine.init();
+    const runId = engine.createRun({ objective: 'disagree', workspace: process.cwd(), config: { limits: { maxRetries: 1, maxAgentsPerTask: 10 } as any } });
+    const s = await waitFor(engine, runId, done);
+    const d = Object.values(s.tasks).find((t) => t.title === 'Task d')!;
+    expect(d.status).toBe('completed');
+    expect(d.verified).toBe(false);
+    expect(d.resultSummary).toMatch(/UNRESOLVED REVIEW DISAGREEMENT/);
+  });
+
+  it('escalates to a stronger tier after repeated failure', async () => {
+    const { engine } = setup((spec) => {
+      if (isPlan(spec)) return { structured: { summary: 'p', reply: 'ok', tasks: [plannedTask('e', { complexity: 1 })] } };
+      if (isSynth(spec)) return { text: '## Summary\ns' };
+      if (spec.model === 'strong') return { text: '## Summary\nsolved' };
+      return { ok: false, error: 'could not solve', errorClass: 'task' };
+    });
+    await engine.init();
+    const runId = engine.createRun({ objective: 'escalate', workspace: process.cwd(), config: { limits: { maxRetries: 3, maxAgentsPerTask: 10 } as any, providers: ['a'] } });
+    const s = await waitFor(engine, runId, done);
+    const e = Object.values(s.tasks).find((t) => t.title === 'Task e')!;
+    expect(e.status).toBe('completed');
+    expect(s.escalations.length).toBeGreaterThan(0);
+    expect(s.agents[e.agentIds.at(-1)!].model).toBe('strong');
+  });
+
+  it('promotes a worker to sub-orchestrator and bounds depth', async () => {
+    const { engine } = setup((spec) => {
+      if (isPlan(spec)) return { structured: { summary: 'p', reply: 'ok', tasks: [plannedTask('big')] } };
+      if (isSynth(spec)) return { text: '## Summary\nsynth' };
+      if (spec.prompt.includes('## Your task: Task big') && spec.prompt.includes('synape-delegate'))
+        return { text: '```synape-delegate\n' + JSON.stringify({ reason: 'large', tasks: [plannedTask('s1'), plannedTask('s2'), plannedTask('s3', { kind: 'orchestrate' })] }) + '\n```' };
+      return { text: '## Summary\nleaf' };
+    });
+    await engine.init();
+    const runId = engine.createRun({ objective: 'delegate', workspace: process.cwd(), config: { limits: { maxDepth: 2 } as any } });
+    const s = await waitFor(engine, runId, done);
+    const big = Object.values(s.tasks).find((t) => t.title === 'Task big')!;
+    expect(big.status).toBe('completed');
+    const kids = Object.values(s.tasks).filter((t) => t.parentTaskId === big.id);
+    expect(kids.map((k) => k.title).sort()).toEqual(['Synthesize: Task big', 'Task s1', 'Task s2', 'Task s3']);
+    // depth 2 == maxDepth → orchestrate request downgraded to work
+    expect(kids.find((k) => k.title === 'Task s3')!.kind).toBe('work');
+    expect(s.agents[big.agentIds[0]].role).toBe('sub_orchestrator');
+    expect(s.limitEvents.some((l) => l.limit === 'maxDepth')).toBe(true);
+  });
+
+  it('rejects cyclic plans and retries planning', async () => {
+    let plans = 0;
+    const { engine } = setup((spec) => {
+      if (isPlan(spec)) {
+        plans++;
+        return plans === 1
+          ? { structured: { summary: 'p', reply: 'ok', tasks: [plannedTask('p', { deps: ['q'] }), plannedTask('q', { deps: ['p'] })] } }
+          : { structured: { summary: 'p', reply: 'ok', tasks: [plannedTask('p')] } };
+      }
+      if (isSynth(spec)) return { text: '## Summary\ns' };
+      return { text: '## Summary\nok' };
+    });
+    await engine.init();
+    const runId = engine.createRun({ objective: 'cycle', workspace: process.cwd() });
+    const s = await waitFor(engine, runId, done);
+    expect(s.run.status).toBe('completed');
+    expect(plans).toBe(2);
+  });
+
+  it('routes around provider failures without blaming the model', async () => {
+    const { engine } = setup((spec) => {
+      if (isPlan(spec)) return { structured: { summary: 'p', reply: 'ok', tasks: [plannedTask('r', { category: 'coding' })] } };
+      if (isSynth(spec)) return { text: '## Summary\ns' };
+      if (spec.model === 'light') return { ok: false, error: '429 rate limit', errorClass: 'provider' };
+      return { text: '## Summary\nok' };
+    });
+    await engine.init();
+    const runId = engine.createRun({ objective: 'provider fail', workspace: process.cwd() });
+    const s = await waitFor(engine, runId, done);
+    expect(s.run.status).toBe('completed');
+    expect(Object.values(s.tasks).some((t) => t.excludedModels.includes('a:light'))).toBe(true);
+    // provider errors are not recorded as model capability failures
+    expect((engine.store.perfTable() as any[]).filter((r) => r.modelId === 'a:light' && r.successes < r.n)).toHaveLength(0);
+  });
+
+  it('cancellation propagates to descendants and running agents', async () => {
+    const { engine } = setup((spec) => {
+      if (isPlan(spec)) return { structured: { summary: 'p', reply: 'ok', tasks: [plannedTask('slow'), plannedTask('after', { deps: ['slow'] })] } };
+      return { text: '## Summary\nok', delayMs: 5000 };
+    });
+    await engine.init();
+    const runId = engine.createRun({ objective: 'cancel', workspace: process.cwd() });
+    await waitFor(engine, runId, (s) => Object.values(s.agents).some((a) => a.status === 'running' && s.tasks[a.taskId].title === 'Task slow'));
+    engine.cancelRun(runId);
+    const s = await waitFor(engine, runId, (s) => Object.values(s.agents).every((a) => a.status !== 'running' && a.status !== 'starting'));
+    expect(s.run.status).toBe('cancelled');
+    expect(Object.values(s.tasks).every((t) => ['cancelled', 'completed'].includes(t.status) || t.kind === 'plan')).toBe(true);
+  });
+
+  it('enforces the permission ceiling through approvals', async () => {
+    const { engine } = setup((spec) => {
+      if (isPlan(spec)) return { structured: { summary: 'p', reply: 'ok', tasks: [plannedTask('net', { permission: 'network' })] } };
+      if (isSynth(spec)) return { text: '## Summary\ns' };
+      return { text: `## Summary\nperm=${spec.permission}` };
+    });
+    await engine.init();
+    const runId = engine.createRun({ objective: 'perm', workspace: process.cwd() });
+    let s = await waitFor(engine, runId, (s) => Object.values(s.approvals).length > 0);
+    const ap = Object.values(s.approvals)[0];
+    expect(ap.kind).toBe('permission');
+    expect(Object.values(s.tasks).find((t) => t.title === 'Task net')!.status).toBe('blocked');
+    engine.resolveApproval(runId, ap.id, false);
+    s = await waitFor(engine, runId, done);
+    expect(Object.values(s.tasks).find((t) => t.title === 'Task net')!.resultSummary).toBe('perm=read');
+  });
+
+  it('survives restart: state rebuilds from disk and interrupted work resumes', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'synape-recover-'));
+    let first = true;
+    const script: Script = (spec) => {
+      if (isPlan(spec)) return { structured: { summary: 'p', reply: 'ok', tasks: [plannedTask('long')] } };
+      if (isSynth(spec)) return { text: '## Summary\ns' };
+      return first ? { text: '## Summary\nx', delayMs: 10_000 } : { text: '## Summary\nresumed' };
+    };
+    const one = setup(script, dir);
+    await one.engine.init();
+    const runId = one.engine.createRun({ objective: 'recover', workspace: process.cwd() });
+    await waitFor(one.engine, runId, (s) => Object.values(s.agents).some((a) => a.status === 'running' && s.tasks[a.taskId].title === 'Task long'));
+    const before = JSON.parse(JSON.stringify(one.engine.state(runId)));
+    // Simulate a crash: drop the engine without graceful shutdown bookkeeping.
+    (one.engine as any).shuttingDown = true;
+    first = false;
+    one.store.close();
+
+    const two = setup(script, dir);
+    // Projection rebuilt purely from persisted events equals the live one.
+    const rebuilt = two.store.state(runId);
+    expect(rebuilt.lastSeq).toBeGreaterThanOrEqual(before.lastSeq);
+    expect(Object.keys(rebuilt.tasks)).toEqual(Object.keys(before.tasks));
+    await two.engine.init();
+    const s = await waitFor(two.engine, runId, done);
+    expect(s.run.status).toBe('completed');
+    const long = Object.values(s.tasks).find((t) => t.title === 'Task long')!;
+    expect(s.agents[long.agentIds[0]].status).toBe('interrupted');
+    expect(long.resultSummary).toBe('resumed');
+    // The resumed attempt reused the interrupted session.
+    expect(two.a.calls.concat(two.b.calls).some((c) => c.resumeSessionId?.startsWith('sess-'))).toBe(true);
+    // Full replay from the event log reproduces the live state exactly.
+    const replayed = foldEvents(two.store.events(runId), initialState(runId));
+    expect(JSON.stringify(replayed)).toEqual(JSON.stringify(two.engine.state(runId)));
+  });
+
+  it('follow-up instructions extend a completed run with new tasks and a new synthesis', async () => {
+    const { engine } = setup((spec) => {
+      if (isPlan(spec)) return { structured: { summary: 'p', reply: 'ok', tasks: [plannedTask('first')] } };
+      if (spec.jsonSchema && 'cancel' in (spec.jsonSchema as any).properties) return { structured: { reply: 'adding', add: [plannedTask('extra')], cancel: [] } };
+      if (isSynth(spec)) return { text: '## Summary\nsynth' };
+      return { text: '## Summary\nok' };
+    });
+    await engine.init();
+    const runId = engine.createRun({ objective: 'followup', workspace: process.cwd() });
+    await waitFor(engine, runId, done);
+    engine.postMessage(runId, 'also do the extra thing');
+    const s = await waitFor(engine, runId, (s) => s.run.status === 'completed' && Object.values(s.tasks).some((t) => t.title === 'Task extra' && t.status === 'completed') && Object.values(s.tasks).filter((t) => t.kind === 'synthesize').every((t) => t.status === 'completed'));
+    expect(Object.values(s.tasks).filter((t) => t.kind === 'synthesize')).toHaveLength(2);
+  });
+});
