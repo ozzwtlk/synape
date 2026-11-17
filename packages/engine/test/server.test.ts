@@ -75,3 +75,12 @@ describe('server security', () => {
     seqs.forEach((s, i) => expect(s).toBe(i + 1));
   });
 });
+
+import { isUsageLimit } from '../src/adapters/types.ts';
+describe('usage-limit classification', () => {
+  it('waits on limits but routes around missing model access', () => {
+    expect(isUsageLimit("API error 429: You've hit your 5-hour limit · resets 9:10pm")).toBe(true);
+    expect(isUsageLimit('You’ve hit your usage limit. Upgrade to Pro or try again at 11:00 PM.')).toBe(true);
+    expect(isUsageLimit('API error 429: Fable 5.2 requires usage credits. Switch to another model')).toBe(false);
+  });
+});

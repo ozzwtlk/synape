@@ -215,6 +215,9 @@ export interface Task extends TaskSpec {
   /** Escalation floor: minimum tier after failures. */
   minTier: number;
   excludedModels: string[];
+  /** Computations by program; open tool calls tracked to close them on agent exit. */
+  computes?: Record<string, ComputeStat>;
+  computeOpen?: Record<string, { program: string; agentId: string }>;
   /** Model chosen by the user for this task; bypasses routing. */
   pinnedModel?: string;
   /** Agents before this index don't count toward retry limits (task was reopened). */
@@ -229,6 +232,17 @@ export interface Task extends TaskSpec {
   endedAt?: number;
   /** Revision feedback for the next attempt. */
   feedback?: string;
+}
+
+/** One program a task has run (Python, Wolfram, MadGraph…), aggregated over its agents. */
+export interface ComputeStat {
+  program: string;
+  runs: number;
+  running: number;
+  ok: number;
+  failed: number;
+  lastInput: string;
+  lastAt: number;
 }
 
 export interface ToolCall {
@@ -343,7 +357,11 @@ export interface Signal {
   seq: number;
 }
 
+/** Bump when the reducer derives new state, so stale snapshots are re-folded. */
+export const STATE_SCHEMA = 2;
+
 export interface RunState {
+  schema?: number;
   run: RunInfo;
   tasks: Record<string, Task>;
   agents: Record<string, Agent>;

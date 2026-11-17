@@ -6,10 +6,11 @@ export interface Pt {
   y: number;
 }
 
-export const NODE_W = { hub: 250, work: 216, review: 168 };
-export const NODE_H = { hub: 86, work: 70, review: 44 };
-
-export const sizeOf = (t: Task) => (t.kind === 'review' ? 'review' : t.kind === 'plan' || t.kind === 'orchestrate' ? 'hub' : 'work');
+/** Orb diameter by role: orchestrators biggest, workers smaller, reviews smaller still. */
+export const orbSize = (t: Task) => (t.kind === 'plan' ? 124 : t.kind === 'orchestrate' ? 94 : t.kind === 'synthesize' ? 66 : t.kind === 'review' ? 34 : 60);
+export const COMPUTE_D = 22;
+export const computeId = (taskId: string, program: string) => `cmp:${taskId}:${program}`;
+const programsOf = (t: Task) => Object.keys(t.computes ?? {});
 
 /** Tasks visible given collapsed clusters. Reviews ride along with their target. */
 export function visibleTasks(s: RunState, collapsed: Set<string>): Task[] {
@@ -62,12 +63,12 @@ function orbit(tasks: Task[]): Map<string, Pt> {
   const kids = childrenMap(tasks);
   const reviewsOf = new Map<string, number>();
   for (const t of tasks) if (t.reviewOf) reviewsOf.set(t.reviewOf, (reviewsOf.get(t.reviewOf) ?? 0) + 1);
-  const LEAF = 122; // radius a leaf (+ its review satellites) needs
+  const LEAF = 100; // radius a leaf orb + its label needs
   const radiusOf = new Map<string, number>(); // extent of a node's whole system
   const ringOf = new Map<string, number>(); // radius of its children's orbit
   const measure = (t: Task): number => {
     const c = kids.get(t.id) ?? [];
-    const own = LEAF + (reviewsOf.get(t.id) ? 40 : 0);
+    const own = LEAF + (reviewsOf.get(t.id) ? 30 : 0) + (programsOf(t).length ? 34 : 0);
     if (!c.length) {
       radiusOf.set(t.id, own);
       return own;
@@ -145,7 +146,7 @@ function flow(tasks: Task[]): Map<string, Pt> {
   for (const t of tasks) if (t.reviewOf) reviewCount.set(t.reviewOf, (reviewCount.get(t.reviewOf) ?? 0) + 1);
   for (const [c, list] of cols) {
     list.sort((a, b) => (rank.get(a.id) ?? 0) - (rank.get(b.id) ?? 0));
-    const heights = list.map((t) => 112 + Math.min(2, reviewCount.get(t.id) ?? 0) * 58);
+    const heights = list.map((t) => 150 + (programsOf(t).length ? 40 : 0));
     const total = heights.reduce((a, b) => a + b, 0);
     let y = -total / 2;
     list.forEach((t, i) => {
@@ -165,15 +166,19 @@ function placeReviews(tasks: Task[], pos: Map<string, Pt>, mode: LayoutMode) {
     if (!p) continue;
     const i = seen.get(t.reviewOf) ?? 0;
     seen.set(t.reviewOf, i + 1);
-    if (mode === 'flow') pos.set(t.id, { x: p.x + 24 + i * 16, y: p.y + 80 + i * 54 });
+    if (mode === 'flow') pos.set(t.id, { x: p.x + 92 + i * 30, y: p.y - 18 + i * 62 });
     else {
       // Satellites just outside their target, away from its orchestrator, stacked.
       const parent = tasks.find((x) => x.id === tasks.find((y) => y.id === t.reviewOf)?.parentTaskId);
       const pp = parent ? pos.get(parent.id) : undefined;
       const dx = pp ? p.x - pp.x : p.x;
       const dy = pp ? p.y - pp.y : p.y;
-      const len = Math.hypot(dx, dy) || 1;
-      pos.set(t.id, { x: p.x + (dx / len) * 185 + (dx >= 0 ? 20 : -20), y: p.y + (dy / len) * 100 + (i - 0.5) * 50 });
+      // Outward from the orchestrator, but never straight down onto the target's label.
+      let a = Math.atan2(dy, dx);
+      const fromDown = Math.atan2(Math.sin(a - Math.PI / 2), Math.cos(a - Math.PI / 2));
+      if (Math.abs(fromDown) < 1.15) a = Math.PI / 2 + (fromDown < 0 ? -1.15 : 1.15);
+      const R = 84 + i * 44;
+      pos.set(t.id, { x: p.x + Math.cos(a) * R, y: p.y + Math.sin(a) * R });
     }
   }
 }
@@ -181,15 +186,55 @@ function placeReviews(tasks: Task[], pos: Map<string, Pt>, mode: LayoutMode) {
 /** Orbit tracks (centre + radius) of each orchestrator, filled by the orbit layout. */
 export const orbitRings = new Map<string, { x: number; y: number; r: number }>();
 
+/**
+ * Computation satellites hug their task on a tight arc, to the side of the
+ * direction away from the parent (reviews take the outward direction).
+ */
+function placeComputes(tasks: Task[], pos: Map<string, Pt>, mode: LayoutMode) {
+  const byId = new Map(tasks.map((t) => [t.id, t]));
+  for (const t of tasks) {
+    const progs = programsOf(t);
+    const p = pos.get(t.id);
+    if (!progs.length || !p) continue;
+    const R = orbSize(t) / 2 + 30;
+    const step = 56 / R; // ~56px between satellite centres, room for labels
+    // Keep clear of the label (below), the incoming edge (toward the parent)
+    // and review satellites (outward): pick the emptiest direction.
+    const pp = t.parentTaskId && byId.has(t.parentTaskId) ? pos.get(t.parentTaskId) : undefined;
+    const out = mode === 'orbit' && pp ? Math.atan2(p.y - pp.y, p.x - pp.x) : 0;
+    const reviewDirs = tasks.filter((r) => r.reviewOf === t.id && pos.has(r.id)).map((r) => Math.atan2(pos.get(r.id)!.y - p.y, pos.get(r.id)!.x - p.x));
+    const avoid = [Math.PI / 2, Math.PI / 2 - 0.5, Math.PI / 2 + 0.5, ...(pp ? [out + Math.PI] : []), ...reviewDirs, ...(mode === 'orbit' && pp ? [out] : [])];
+    const gap = (a: number, b: number) => Math.abs(Math.atan2(Math.sin(a - b), Math.cos(a - b)));
+    const half = ((progs.length - 1) / 2) * step;
+    let base = -Math.PI / 2;
+    let bestScore = -1;
+    for (let k = 0; k < 24; k++) {
+      const a = -Math.PI + (k * Math.PI) / 12;
+      // Score the whole arc by its closest approach to anything to avoid.
+      const score = Math.min(...avoid.map((v) => Math.max(0, gap(a, v) - half)));
+      if (score > bestScore + 1e-6) (bestScore = score), (base = a);
+    }
+    progs.forEach((prog, i) => {
+      const a = base + (i - (progs.length - 1) / 2) * step;
+      pos.set(computeId(t.id, prog), { x: p.x + Math.cos(a) * R, y: p.y + Math.sin(a) * R });
+    });
+  }
+}
+
+/** Top-left anchors for every task orb and computation satellite. */
 export function layout(tasks: Task[], mode: LayoutMode): Map<string, Pt> {
   orbitRings.clear();
   const pos = mode === 'orbit' ? orbit(tasks) : flow(tasks);
-  // Convert centers to top-left anchors.
+  placeComputes(tasks, pos, mode);
   const out = new Map<string, Pt>();
   for (const t of tasks) {
     const p = pos.get(t.id) ?? { x: 0, y: 0 };
-    const k = sizeOf(t);
-    out.set(t.id, mode === 'orbit' ? { x: p.x - NODE_W[k] / 2, y: p.y - NODE_H[k] / 2 } : p);
+    const d = orbSize(t);
+    out.set(t.id, { x: p.x - d / 2, y: p.y - d / 2 });
+    for (const prog of programsOf(t)) {
+      const q = pos.get(computeId(t.id, prog));
+      if (q) out.set(computeId(t.id, prog), { x: q.x - COMPUTE_D / 2, y: q.y - COMPUTE_D / 2 });
+    }
   }
   return out;
 }

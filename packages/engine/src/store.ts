@@ -2,7 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { applyEvent, foldEvents, initialState, type EventBody, type EventEnvelope, type ModelStats, type RunState, type TaskCategory } from '@synape/core';
+import { applyEvent, foldEvents, initialState, STATE_SCHEMA, type EventBody, type EventEnvelope, type ModelStats, type RunState, type TaskCategory } from '@synape/core';
 
 export interface AppendMeta {
   correlationId?: string;
@@ -122,7 +122,9 @@ export class EventStore {
     let s = this.states.get(runId);
     if (s) return s;
     const snap = this.db.prepare('SELECT seq, state FROM snapshots WHERE run_id = ? ORDER BY seq DESC LIMIT 1').get(runId) as { seq: number; state: string } | undefined;
-    s = snap ? (JSON.parse(snap.state) as RunState) : initialState(runId);
+    const fromSnap = snap ? (JSON.parse(snap.state) as RunState) : undefined;
+    // Snapshots from an older reducer lack newer derived state: re-fold from the log.
+    s = fromSnap?.schema === STATE_SCHEMA ? fromSnap : initialState(runId);
     s = foldEvents(this.events(runId, s.lastSeq), s);
     this.states.set(runId, s);
     return s;

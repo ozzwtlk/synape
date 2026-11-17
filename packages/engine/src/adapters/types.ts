@@ -54,10 +54,21 @@ export const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}â
 /** quota = subscription/usage limit: wait for the reset, it's nobody's fault. */
 export type ErrorClass = 'quota' | 'provider' | 'task' | 'timeout' | 'cancelled';
 
-export const isUsageLimit = (msg: string) => /hit your .{0,30}limit|usage limit|rate[ _-]?limit|quota|too many requests|\b429\b/i.test(msg);
+/** "Requires credits / not available on your plan" is an access problem: route to another model, don't wait. */
+const NO_ACCESS = /requires (usage )?credits|switch to another model|not available (on|for) your|does not have access|model_not_found|no access/i;
+export const isUsageLimit = (msg: string) => !NO_ACCESS.test(msg) && /hit your .{0,30}limit|usage limit|rate[ _-]?limit|quota|too many requests|\b429\b/i.test(msg);
 
 /** Best-effort "try again in 2 hours 5 minutes" â†’ ms from now. */
 export function retryAfterMs(msg: string): number | undefined {
+  const at = msg.match(/(?:try again|retry|resets?)\s+at\s+(\d{1,2})(?::(\d{2}))?\s*([ap]\.?m\.?)?/i);
+  if (at) {
+    let h = Number(at[1]) % 24;
+    if (at[3]) h = (h % 12) + (/^p/i.test(at[3]) ? 12 : 0);
+    const t = new Date();
+    t.setHours(h, Number(at[2] ?? 0), 0, 0);
+    if (t.getTime() <= Date.now()) t.setDate(t.getDate() + 1);
+    return t.getTime() - Date.now();
+  }
   const m = msg.match(/(?:try again|retry|resets?)\s+in\s+((?:\d+\s*(?:days?|d|hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b[\s,and]*)+)/i);
   if (!m) return undefined;
   let ms = 0;

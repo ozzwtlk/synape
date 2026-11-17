@@ -919,3 +919,214 @@ input[type='range'] {
     stroke-dashoffset: -220;
   }
 }
+
+/* ───────────── orbs: tasks as glowing WIMP-like particles ───────────── */
+.legend i.sat {
+  width: 6px;
+  height: 6px;
+  background: conic-gradient(#ff6ad5, #ffd36b, #6dffb3, #5ee7ff, #b8a6ff, #ff6ad5);
+  box-shadow: 0 0 6px rgba(255, 255, 255, 0.5);
+}
+.orb-node {
+  position: relative;
+  border-radius: 50%;
+  cursor: pointer;
+  transition: opacity 0.3s, filter 0.3s;
+}
+.orb-node .h {
+  opacity: 0;
+  left: 50% !important;
+  top: 50% !important;
+  pointer-events: none;
+}
+.orb-svg {
+  position: absolute;
+  inset: 0;
+  overflow: visible;
+}
+.orb-halo {
+  position: absolute;
+  inset: -55%;
+  border-radius: 50%;
+  background: radial-gradient(circle, color-mix(in srgb, var(--c) 55%, transparent) 0%, color-mix(in srgb, var(--c) 18%, transparent) 32%, transparent 62%);
+  opacity: 0.35;
+  pointer-events: none;
+  transition: opacity 0.5s;
+}
+.orb-node.live .orb-halo {
+  opacity: 0.85;
+}
+.graph.animated .orb-node.live .orb-halo {
+  animation: halo 2.6s ease-in-out infinite;
+}
+@keyframes halo {
+  50% {
+    transform: scale(1.12);
+    opacity: 1;
+  }
+}
+.orb-node.k-plan .orb-halo {
+  inset: -70%;
+  opacity: 0.6;
+}
+.orb-node.faint .orb-halo {
+  opacity: 0.12;
+}
+.orb-node.tone-bad .orb-halo {
+  opacity: 0.6;
+}
+.orb-core {
+  filter: drop-shadow(0 0 6px var(--c)) drop-shadow(0 0 16px var(--c));
+}
+.graph.animated .orb-core.live {
+  transform-origin: center;
+  transform-box: fill-box;
+  animation: core 1.9s ease-in-out infinite;
+}
+@keyframes core {
+  50% {
+    transform: scale(1.08);
+    filter: drop-shadow(0 0 9px var(--c)) drop-shadow(0 0 26px var(--c));
+  }
+}
+.orb-ctx {
+  filter: drop-shadow(0 0 3px var(--c));
+}
+.graph.animated .orb-spin {
+  transform-origin: center;
+  transform-box: fill-box;
+  animation: orbit 7s linear infinite;
+}
+.graph.animated .orb-spin.fast {
+  animation-duration: 2.2s;
+}
+.orb-electron {
+  filter: drop-shadow(0 0 3px currentColor) drop-shadow(0 0 6px currentColor);
+}
+.graph.animated .orb-twinkle {
+  animation: twinkle 2s ease-in-out infinite;
+}
+@keyframes twinkle {
+  0%,
+  100% {
+    opacity: 0.15;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+.orb-node.sel .orb-svg {
+  filter: drop-shadow(0 0 0 transparent);
+}
+.orb-node.sel::after {
+  content: '';
+  position: absolute;
+  inset: -9px;
+  border-radius: 50%;
+  border: 1.5px solid var(--nucleus);
+  box-shadow: 0 0 18px rgba(184, 166, 255, 0.55), inset 0 0 12px rgba(184, 166, 255, 0.25);
+  pointer-events: none;
+}
+.orb-node.dim {
+  opacity: 0.14;
+}
+.orb-node:hover {
+  filter: brightness(1.18);
+}
+.orb-label {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 196px;
+  text-align: center;
+  pointer-events: auto;
+  text-shadow: 0 0 6px #03050b, 0 0 12px #03050b, 0 1px 2px #000;
+}
+.orb-label.small {
+  width: 150px;
+}
+.orb-eyebrow {
+  font: 600 8.5px/1.2 var(--font-mono);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+.orb-title {
+  font: 600 12.5px/1.25 var(--font-display);
+  color: var(--text);
+  margin: 2px 0 1px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.orb-title.hub {
+  font-size: 14px;
+}
+.orb-node.k-plan .orb-title {
+  font-size: 15.5px;
+  color: #f1edff;
+  text-shadow: 0 0 10px rgba(184, 166, 255, 0.8), 0 0 6px #03050b, 0 1px 2px #000;
+}
+.orb-meta {
+  font: 10px/1.3 var(--font-mono);
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.orb-meta .tn-badge {
+  margin-left: 5px;
+}
+.orb-tool {
+  margin-top: 2px;
+  font: 9.5px/1.3 var(--font-mono);
+  color: var(--c);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.orb-node .tn-collapse {
+  right: -14px;
+  top: -4px;
+  transform: none;
+}
+/* computation satellites */
+.orb-node.compute .orb-halo {
+  inset: -80%;
+  opacity: 0.45;
+}
+.orb-node.compute.live .orb-halo {
+  opacity: 1;
+}
+.orb-label.compute {
+  width: 90px;
+  font: 600 8.5px/1.1 var(--font-mono);
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+.orb-ripple {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 1.5px solid var(--c);
+  animation: ripple 1.4s ease-out infinite;
+  pointer-events: none;
+}
+@keyframes ripple {
+  from {
+    transform: scale(1);
+    opacity: 0.9;
+  }
+  to {
+    transform: scale(2.6);
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .orb-ripple,
+  .orb-halo,
+  .orb-core {
+    animation: none !important;
+  }
+}

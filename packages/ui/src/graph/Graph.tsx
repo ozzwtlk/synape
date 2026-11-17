@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ReactFlow, MiniMap, Controls, Panel, useReactFlow, type Node, type NodeMouseHandler } from '@xyflow/react';
 import type { RunState, Task } from '@synape/core';
-import { TaskNode, type TaskFlowNode } from './TaskNode';
+import { ComputeNode, TaskNode, type ComputeFlowNode, type TaskFlowNode } from './TaskNode';
 import { EdgeDefs, SynapseEdge, type SynapseFlowEdge } from './SynapseEdge';
 import { Starfield } from './Starfield';
-import { layout, orbitRings, visibleTasks, type LayoutMode } from './layout';
+import { computeId, layout, orbitRings, visibleTasks, type LayoutMode } from './layout';
 import { getStore, select, useStore, viewState } from '../store';
-import { familyOfProvider, isActive, latestAgent, tokensOf } from '../util';
+import { familyOfProvider, isActive, latestAgent, programColor, tokensOf } from '../util';
 
 function OrbitTrack({ data }: { data: { r: number; live: boolean; dim: boolean } }) {
   const d = data.r * 2;
@@ -16,7 +16,7 @@ function OrbitTrack({ data }: { data: { r: number; live: boolean; dim: boolean }
     </svg>
   );
 }
-const nodeTypes = { task: TaskNode, orbit: OrbitTrack };
+const nodeTypes = { task: TaskNode, compute: ComputeNode, orbit: OrbitTrack };
 const edgeTypes = { synapse: SynapseEdge };
 const PULSE_MS = 1400;
 
@@ -67,7 +67,7 @@ export function Graph() {
   const selectedTaskId = selection ? (selection.kind === 'task' ? selection.id : state?.agents[selection.id]?.taskId) : undefined;
 
   const { nodes, edges, activeCount, structureKey, rings } = useMemo(() => {
-    if (!state) return { nodes: [] as TaskFlowNode[], edges: [] as SynapseFlowEdge[], activeCount: 0, structureKey: '', rings: [] as { id: string; x: number; y: number; r: number; live: boolean; dim: boolean }[] };
+    if (!state) return { nodes: [] as (TaskFlowNode | ComputeFlowNode)[], edges: [] as SynapseFlowEdge[], activeCount: 0, structureKey: '', rings: [] as { id: string; x: number; y: number; r: number; live: boolean; dim: boolean }[] };
     const tasks = visibleTasks(state, collapsed);
     const pos = layout(tasks, mode);
     const visible = new Set(tasks.map((t) => t.id));
@@ -75,21 +75,31 @@ export function Graph() {
     const childCount = new Map<string, number>();
     for (const t of Object.values(state.tasks)) if (t.parentTaskId) childCount.set(t.parentTaskId, (childCount.get(t.parentTaskId) ?? 0) + 1);
     let activeCount = 0;
-    const nodes: TaskFlowNode[] = tasks.map((t) => {
+    const nodes: (TaskFlowNode | ComputeFlowNode)[] = tasks.map((t): TaskFlowNode => {
       const a = latestAgent(state, t);
       if (isActive(a)) activeCount++;
       const running = a && isActive(a) ? a.toolCalls.filter((c) => !c.endedAt).map((c) => c.name) : [];
       const activeTools = running.length ? running.join(', ') : isActive(a) && a?.toolCalls.length ? `${a.toolCalls.at(-1)!.name} · ${a.toolCount} tools` : null;
       const dim = !!near && !near.has(t.id);
-      const sig = [t.status, t.verified, t.attempts, tokensOf(t.usage), a?.id, a?.status, a?.toolCount, a?.usage.peakContextTokens, activeTools, collapsed.has(t.id), childCount.get(t.id), dim, t.title, t.resultSummary?.slice(0, 12)].join('|');
+      const sig = [Object.keys(t.computes ?? {}).length, t.status, t.verified, t.attempts, tokensOf(t.usage), a?.id, a?.status, a?.toolCount, a?.usage.peakContextTokens, activeTools, collapsed.has(t.id), childCount.get(t.id), dim, t.title, t.resultSummary?.slice(0, 12)].join('|');
       return {
         id: t.id,
         type: 'task',
         position: pos.get(t.id)!,
-        data: { task: t, agent: a, childCount: childCount.get(t.id) ?? 0, collapsed: collapsed.has(t.id), activeTools, sig, dim, onToggle: toggle },
+        data: { task: t, agent: a, childCount: childCount.get(t.id) ?? 0, collapsed: collapsed.has(t.id), activeTools, sig, dim, animate, onToggle: toggle },
         selected: t.id === selectedTaskId,
       };
     });
+    // Computations (Python, Wolfram, MadGraph…) as small satellites of their task.
+    for (const t of tasks) {
+      for (const stat of Object.values(t.computes ?? {})) {
+        const id = computeId(t.id, stat.program);
+        const p = pos.get(id);
+        if (!p) continue;
+        const dim = !!near && !near.has(t.id);
+        nodes.push({ id, type: 'compute', position: p, data: { taskId: t.id, stat, dim, animate, sig: [stat.runs, stat.running, stat.ok, stat.failed, dim].join('|') }, selectable: false, zIndex: 2 });
+      }
+    }
 
     // Fresh signals → pulses along the corresponding edge.
     const store = getStore();
@@ -106,7 +116,7 @@ export function Graph() {
     }
 
     const edges: SynapseFlowEdge[] = [];
-    const add = (id: string, source: string, target: string, kind: 'tree' | 'dep' | 'review', live: boolean, color: string, extra: Partial<SynapseFlowEdge['data']> = {}) => {
+    const add = (id: string, source: string, target: string, kind: 'tree' | 'dep' | 'review' | 'compute', live: boolean, color: string, extra: Partial<SynapseFlowEdge['data']> = {}) => {
       if (!visible.has(source) || !visible.has(target)) return;
       const dim = !!near && !(near.has(source) && near.has(target));
       const fwd = pulses.get(`${source}>${target}`);
@@ -124,6 +134,11 @@ export function Graph() {
         if (t.kind === 'review') continue;
         const src = state.tasks[d];
         add(`d:${d}>${t.id}`, d, t.id, 'dep', isActive(a) && src?.status === 'completed', famColor(latestAgent(state, src ?? t)?.provider));
+      }
+      for (const stat of Object.values(t.computes ?? {})) {
+        const cid = computeId(t.id, stat.program);
+        visible.add(cid);
+        add(`c:${cid}`, t.id, cid, 'compute', stat.running > 0, programColor(stat.program));
       }
       if (t.reviewOf) {
         const v = t.resultSummary?.split(' ')[0];
@@ -151,7 +166,7 @@ export function Graph() {
     const first = !lastStructure.current;
     lastStructure.current = structureKey;
     requestAnimationFrame(() => {
-      void rf.fitView({ padding: 0.26, duration: first || !animate ? 0 : 600, maxZoom: 1.1 });
+      void rf.fitView({ padding: 0.34, duration: first || !animate ? 0 : 600, maxZoom: 1.1 });
     });
   }, [structureKey, nodes.length, rf, animate]);
 
@@ -168,6 +183,7 @@ export function Graph() {
 
   const onNodeClick: NodeMouseHandler = useCallback((_, n) => {
     if (n.type === 'task') select({ kind: 'task', id: n.id });
+    else if (n.type === 'compute') select({ kind: 'task', id: (n.data as ComputeFlowNode['data']).taskId });
   }, []);
 
   if (!state) return <div className="graph-empty" />;
@@ -197,6 +213,7 @@ export function Graph() {
           className="minimap"
           maskColor="rgba(3,5,11,0.72)"
           nodeColor={(n) => {
+            if (n.type === 'compute') return programColor((n.data as ComputeFlowNode['data']).stat.program);
             if (n.type !== 'task') return 'transparent';
             const d = n.data as TaskFlowNode['data'];
             if (d.task.status === 'failed') return '#ff5c7a';
@@ -204,7 +221,7 @@ export function Graph() {
             return famColor(d.agent?.provider);
           }}
           nodeStrokeWidth={0}
-          nodeBorderRadius={6}
+          nodeBorderRadius={99}
         />
         <Controls showInteractive={false} className="controls" />
         <Panel position="top-left" className="graph-tools">
@@ -237,6 +254,9 @@ export function Graph() {
           </span>
           <span>
             <i className="ring" /> ring = context used
+          </span>
+          <span>
+            <i className="sat" /> satellites = computations (color by program)
           </span>
         </Panel>
       </ReactFlow>

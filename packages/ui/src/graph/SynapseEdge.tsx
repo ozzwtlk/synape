@@ -1,7 +1,7 @@
 import { memo } from 'react';
 import { BaseEdge, useInternalNode, type Edge, type EdgeProps, type InternalNode } from '@xyflow/react';
 
-export type EdgeKind = 'tree' | 'dep' | 'review';
+export type EdgeKind = 'tree' | 'dep' | 'review' | 'compute';
 export interface SynapseEdgeData extends Record<string, unknown> {
   kind: EdgeKind;
   /** Work is actively flowing along this edge right now (real agent state). */
@@ -16,17 +16,18 @@ export interface SynapseEdgeData extends Record<string, unknown> {
 }
 export type SynapseFlowEdge = Edge<SynapseEdgeData, 'synapse'>;
 
-/** Point where the ray from the node centre toward `to` leaves the node's box. */
+/** Point where the ray from the orb's centre toward `to` leaves its rim. */
 function border(n: InternalNode, to: { x: number; y: number }) {
-  const w = n.measured.width ?? 200;
+  const w = n.measured.width ?? 60;
   const h = n.measured.height ?? 60;
   const cx = n.internals.positionAbsolute.x + w / 2;
   const cy = n.internals.positionAbsolute.y + h / 2;
   const dx = to.x - cx;
   const dy = to.y - cy;
-  if (!dx && !dy) return { x: cx, y: cy };
-  const s = 1 / Math.max(Math.abs(dx) / (w / 2 + 4), Math.abs(dy) / (h / 2 + 4));
-  return { x: cx + dx * s, y: cy + dy * s };
+  const len = Math.hypot(dx, dy);
+  if (!len) return { x: cx, y: cy };
+  const r = Math.min(w, h) / 2 + 4;
+  return { x: cx + (dx / len) * r, y: cy + (dy / len) * r };
 }
 const center = (n: InternalNode) => ({ x: n.internals.positionAbsolute.x + (n.measured.width ?? 200) / 2, y: n.internals.positionAbsolute.y + (n.measured.height ?? 60) / 2 });
 
@@ -41,6 +42,16 @@ function SynapseEdgeView({ id, source, target, data }: EdgeProps<SynapseFlowEdge
   const dy = b.y - a.y;
   const len = Math.hypot(dx, dy) || 1;
   const bend = data.kind === 'tree' ? 0.12 : data.kind === 'dep' ? 0.06 : 0.0;
+  if (data.kind === 'compute') {
+    // A short tether; glows while the program runs.
+    const p = `M ${a.x} ${a.y} L ${b.x} ${b.y}`;
+    return (
+      <g className="syn-edge k-compute" opacity={data.dim ? 0.06 : 1}>
+        <path d={p} fill="none" stroke={data.color} strokeOpacity={data.live ? 0.9 : 0.35} strokeWidth={data.live ? 1.6 : 1} strokeDasharray={data.live ? undefined : '2 3'} />
+        {data.live && data.animate && <path d={p} fill="none" stroke={data.color} strokeWidth={2.4} className="syn-flow" strokeLinecap="round" />}
+      </g>
+    );
+  }
   const mx = (a.x + b.x) / 2 - (dy / len) * len * bend;
   const my = (a.y + b.y) / 2 + (dx / len) * len * bend;
   const path = `M ${a.x} ${a.y} Q ${mx} ${my} ${b.x} ${b.y}`;

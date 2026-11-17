@@ -1,6 +1,7 @@
 import type { EventEnvelope } from './events.ts';
 import type { Agent, RunState, Task, Usage } from './types.ts';
-import { DEFAULT_CONFIG, emptyUsage } from './types.ts';
+import { DEFAULT_CONFIG, STATE_SCHEMA, emptyUsage } from './types.ts';
+import { classifyCompute } from './compute.ts';
 
 const OUTPUT_TAIL = 80;
 const TOOL_TAIL = 60;
@@ -8,6 +9,7 @@ const SIGNAL_TAIL = 48;
 
 export function initialState(runId = ''): RunState {
   return {
+    schema: STATE_SCHEMA,
     run: { id: runId, title: '', objective: '', workspace: '', config: DEFAULT_CONFIG, status: 'planning', createdAt: 0 },
     tasks: {},
     agents: {},
@@ -215,6 +217,14 @@ export function applyEvent(s: RunState, e: EventEnvelope): RunState {
       a.lastActivity = e.ts;
       if (['completed', 'failed', 'cancelled', 'interrupted'].includes(b.status)) {
         a.endedAt = e.ts;
+        // A finished agent has no computations still running.
+        const t = s.tasks[a.taskId];
+        for (const [toolId, o] of Object.entries(t?.computeOpen ?? {})) {
+          if (o.agentId !== a.id) continue;
+          const c = t!.computes![o.program];
+          c.running = Math.max(0, c.running - 1);
+          delete t!.computeOpen![toolId];
+        }
         if (b.status === 'completed') signal(s, b.agentId, a.parentAgentId, 'result', e.seq);
       }
       break;
@@ -244,12 +254,31 @@ export function applyEvent(s: RunState, e: EventEnvelope): RunState {
       a.toolCount++;
       a.lastActivity = e.ts;
       pushBounded(a.toolCalls, { id: b.toolId, name: b.name, input: b.input, startedAt: e.ts }, TOOL_TAIL);
+      const program = classifyCompute(b.name, b.input);
+      const t = s.tasks[a.taskId];
+      if (program && t) {
+        const c = ((t.computes ??= {})[program] ??= { program, runs: 0, running: 0, ok: 0, failed: 0, lastInput: '', lastAt: 0 });
+        c.runs++;
+        c.running++;
+        c.lastInput = b.input.slice(0, 300);
+        c.lastAt = e.ts;
+        (t.computeOpen ??= {})[b.toolId] = { program, agentId: a.id };
+      }
       break;
     }
     case 'tool.finished': {
       const a = s.agents[b.agentId];
       if (!a) break;
       a.lastActivity = e.ts;
+      const t = s.tasks[a.taskId];
+      const open = t?.computeOpen?.[b.toolId];
+      if (t && open) {
+        const c = t.computes![open.program];
+        c.running = Math.max(0, c.running - 1);
+        if (b.ok) c.ok++;
+        else c.failed++;
+        delete t.computeOpen![b.toolId];
+      }
       const tc = a.toolCalls.find((x) => x.id === b.toolId);
       if (tc) {
         tc.ok = b.ok;

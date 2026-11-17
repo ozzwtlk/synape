@@ -56,3 +56,11 @@ export const STATUS_LABEL: Record<string, string> = {
   cancelled: 'cancelled',
   blocked: 'needs approval',
 };
+
+/** Deterministic hue for a program name (FNV-1a hash, spread by the golden angle). */
+export const programHue = (name: string) => {
+  let h = 2166136261;
+  for (const ch of name.toLowerCase()) h = Math.imul(h ^ ch.charCodeAt(0), 16777619);
+  return Math.round(((h >>> 0) * 137.508) % 360);
+};
+export const programColor = (name: string) => `hsl(${programHue(name)} 92% 64%)`;
