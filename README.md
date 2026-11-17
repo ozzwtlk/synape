@@ -118,4 +118,4 @@ Engine tests use a scripted, test-only provider (`packages/engine/test/fakes.ts`
 
 ## License
 
-TBD (see LICENSE).
+[MIT](LICENSE). Third-party dependencies (React, React Flow, marked, DOMPurify, Fontsource fonts, Vite, Vitest, Playwright) are under MIT, Apache-2.0, MPL-2.0/Apache-2.0 (DOMPurify) or OFL-1.1 (fonts) licenses.
