@@ -56,6 +56,8 @@ export const BUILTIN_MODELS: Omit<ModelProfile, 'available'>[] = [
     skill: { extraction: 0.92, analysis: 0.93, coding: 0.9, reasoning: 0.93, writing: 0.93, research: 0.9, review: 0.93, planning: 0.92 },
     ruPer1kTokens: 9,
     latencyFactor: 1.4,
+    // Not included in every Claude plan: opt in from the Fleet panel.
+    defaultEnabled: false,
   },
   {
     id: 'codex:gpt-6-luna@low',

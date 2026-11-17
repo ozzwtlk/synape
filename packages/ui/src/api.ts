@@ -66,6 +66,8 @@ export const api = {
   message: (id: string, text: string, agentId?: string) => req(`/api/runs/${id}/messages`, { method: 'POST', json: { text, agentId } }),
   control: (id: string, action: 'pause' | 'resume' | 'cancel') => req(`/api/runs/${id}/control`, { method: 'POST', json: { action } }),
   task: (id: string, taskId: string, action: 'cancel' | 'retry') => req(`/api/runs/${id}/tasks/${taskId}/${action}`, { method: 'POST', json: {} }),
+  setTaskModel: (id: string, taskId: string, modelId: string | null) => req(`/api/runs/${id}/tasks/${taskId}/model`, { method: 'POST', json: { modelId } }),
+  setModelEnabled: (modelId: string, enabled: boolean) => req('/api/models', { method: 'POST', json: { modelId, enabled } }),
   approve: (id: string, approvalId: string, approved: boolean) => req(`/api/runs/${id}/approvals/${approvalId}`, { method: 'POST', json: { approved } }),
   git: (path: string) => req<RepoInfo>(`/api/git?path=${encodeURIComponent(path)}`),
   gitAction: (id: string, kind: string) => req(`/api/runs/${id}/git`, { method: 'POST', json: { kind } }),

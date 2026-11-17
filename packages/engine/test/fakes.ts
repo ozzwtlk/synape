@@ -19,7 +19,7 @@ export class ScriptedAdapter implements ProviderAdapter {
     const r = this.script(spec, this.calls.length);
     yield { kind: 'session', sessionId: `sess-${spec.agentId}` };
     yield { kind: 'tool_start', id: 't1', name: 'Read', input: '{}' };
-    if (r.delayMs) {
+    if (r.delayMs && !spec.signal.aborted) {
       await new Promise<void>((ok) => {
         const t = setTimeout(ok, r.delayMs);
         spec.signal.addEventListener('abort', () => {

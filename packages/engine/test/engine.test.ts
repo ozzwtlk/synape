@@ -229,6 +229,45 @@ describe('engine', () => {
     expect(Object.values(s.tasks).every((t) => t.status === 'completed')).toBe(true);
   });
 
+  it('models off by default are never routed to until enabled', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'synape-test-'));
+    const store = new EventStore(join(dir, 'db.sqlite'));
+    const script: Script = (spec) => (isPlan(spec) ? { structured: { summary: 'p', reply: 'ok', tasks: [plannedTask('o')] } } : { text: '## Summary\nok' });
+    const a = new ScriptedAdapter('a', script);
+    const models = MODELS.map((m) => (m.id === 'a:strong' ? { ...m, defaultEnabled: false } : m));
+    const engine = new Engine({ store, adapters: [a, new ScriptedAdapter('b', script)], dataDir: dir, models });
+    await engine.init();
+    expect(engine.models.find((m) => m.id === 'a:strong')).toMatchObject({ disabled: true, available: false });
+    const runId = engine.createRun({ objective: 'opt-in', workspace: process.cwd() });
+    const s = await waitFor(engine, runId, done);
+    expect(Object.values(s.agents).some((x) => x.modelId === 'a:strong')).toBe(false);
+    engine.setModelEnabled('a:strong', true);
+    // persisted: a fresh engine on the same data dir sees it enabled
+    const again = new Engine({ store, adapters: [a], dataDir: dir, models });
+    await again.init();
+    expect(again.models.find((m) => m.id === 'a:strong')?.disabled).toBe(false);
+  });
+
+  it('user can switch a running task to another model without spending a retry', async () => {
+    const { engine } = setup((spec) => {
+      if (isPlan(spec)) return { structured: { summary: 'p', reply: 'ok', tasks: [plannedTask('m')] } };
+      if (isSynth(spec)) return { text: '## Summary\ns' };
+      return spec.model === 'mid' ? { text: '## Summary\nby mid' } : { text: '## Summary\nslow', delayMs: 5000 };
+    });
+    await engine.init();
+    const runId = engine.createRun({ objective: 'pin', workspace: process.cwd() });
+    let s = await waitFor(engine, runId, (x) => Object.values(x.tasks).some((t) => t.title === 'Task m' && t.status === 'running'));
+    const t = Object.values(s.tasks).find((x) => x.title === 'Task m')!;
+    if (s.agents[t.agentIds.at(-1)!].modelId === 'b:mid') return; // router already chose it; nothing to switch
+    engine.setTaskModel(runId, t.id, 'b:mid');
+    s = await waitFor(engine, runId, done);
+    expect(s.run.status).toBe('completed');
+    const agents = s.tasks[t.id].agentIds.map((x) => s.agents[x]);
+    expect(agents.at(-1)!.modelId).toBe('b:mid');
+    expect(agents.slice(0, -1).every((x) => x.status === 'interrupted')).toBe(true);
+    expect(s.tasks[t.id].routing?.explanation).toMatch(/chosen by user/);
+  });
+
   it('cancellation propagates to descendants and running agents', async () => {
     const { engine } = setup((spec) => {
       if (isPlan(spec)) return { structured: { summary: 'p', reply: 'ok', tasks: [plannedTask('slow'), plannedTask('after', { deps: ['slow'] })] } };

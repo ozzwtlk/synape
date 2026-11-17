@@ -77,6 +77,8 @@ export class Engine {
   private running = new Map<string, RunningAgent>();
   private tickQueued = new Set<string>();
   private resumeTimers = new Map<string, NodeJS.Timeout>();
+  /** Agents aborted because the user switched their task's model. */
+  private reassigning = new Set<string>();
   private worktrees: Worktrees;
   private repoCache = new Map<string, Awaited<ReturnType<typeof repoInfo>>>();
   private shuttingDown = false;
@@ -102,11 +104,43 @@ export class Engine {
   async detectProviders() {
     const infos = await Promise.all([...this.adapters.values()].map((a) => a.detect().catch((e): ProviderInfo => ({ id: a.id, label: a.id, available: false, reason: String(e), billing: 'unknown' }))));
     for (const i of infos) this.providers.set(i.id, i);
+    this.applyModelSettings();
+    return infos;
+  }
+
+  // ================================================================ model settings
+
+  private get settingsPath() {
+    return join(this.dataDir, 'settings.json');
+  }
+
+  private readSettings(): { modelEnabled?: Record<string, boolean> } {
+    try {
+      return JSON.parse(readFileSync(this.settingsPath, 'utf8'));
+    } catch {
+      return {};
+    }
+  }
+
+  private applyModelSettings() {
+    const overrides = this.readSettings().modelEnabled ?? {};
     this.models = this.catalog.map((m) => {
       const p = this.providers.get(m.provider);
-      return { ...m, available: !!p?.available, unavailableReason: p?.available ? undefined : (p?.reason ?? 'no adapter') };
+      const disabled = !(overrides[m.id] ?? m.defaultEnabled ?? true);
+      const available = !!p?.available && !disabled;
+      const unavailableReason = !p?.available ? (p?.reason ?? 'no adapter') : disabled ? 'disabled in Fleet' : undefined;
+      return { ...m, disabled, available, unavailableReason };
     });
-    return infos;
+  }
+
+  /** Turn a model on or off for routing (persisted across restarts). */
+  setModelEnabled(modelId: string, enabled: boolean) {
+    if (!this.catalog.some((m) => m.id === modelId)) throw new Error(`unknown model ${modelId}`);
+    const st = this.readSettings();
+    st.modelEnabled = { ...st.modelEnabled, [modelId]: enabled };
+    mkdirSync(this.dataDir, { recursive: true });
+    writeFileSync(this.settingsPath, JSON.stringify(st, null, 2));
+    this.applyModelSettings();
   }
 
   /** Resume runs that were active when the process stopped. */
@@ -295,6 +329,37 @@ export class Engine {
     this.emit(runId, { type: 'task.status', taskId, status: 'ready', reason: 'retry requested by user' });
     const s = this.state(runId);
     if (['completed', 'failed'].includes(s.run.status)) this.emit(runId, { type: 'run.status', status: 'running', reason: 'task retried' });
+    this.scheduleTick(runId);
+  }
+
+  /**
+   * Pin a task to a model (or undefined = back to automatic routing).
+   * A running agent is stopped and the task restarts on the new model without
+   * spending a retry; a finished task re-runs.
+   */
+  setTaskModel(runId: string, taskId: string, modelId?: string) {
+    const s = this.state(runId);
+    const t = s.tasks[taskId];
+    if (!t) throw new Error('task not found');
+    if (modelId) {
+      const m = this.models.find((x) => x.id === modelId);
+      if (!m) throw new Error(`unknown model ${modelId}`);
+      if (!m.available) throw new Error(`${m.label} is not available: ${m.unavailableReason}`);
+    }
+    if ((t.pinnedModel ?? undefined) === modelId) return;
+    this.emit(runId, { type: 'task.model', taskId, modelId });
+    if (t.status === 'running') {
+      for (const aid of t.agentIds) {
+        const r = this.running.get(aid);
+        if (r && r.agentId && !r.abort.signal.aborted) {
+          this.reassigning.add(aid);
+          r.abort.abort();
+        }
+      }
+    } else if (['failed', 'cancelled', 'completed'].includes(t.status) && t.kind !== 'plan' && t.kind !== 'orchestrate') {
+      this.emit(runId, { type: 'task.reopened', taskId, status: 'pending', reason: `re-running on ${modelId ?? 'auto-routed model'}` });
+      if (['completed', 'failed'].includes(s.run.status)) this.emit(runId, { type: 'run.status', status: 'running', reason: 'task model changed' });
+    }
     this.scheduleTick(runId);
   }
 
@@ -554,7 +619,7 @@ export class Engine {
   private routeTask(s: RunState, t: Task): RoutingDecision {
     // Resume an interrupted session on the same model when possible.
     const last = t.agentIds.length ? s.agents[t.agentIds.at(-1)!] : undefined;
-    if (last?.status === 'interrupted' && last.sessionId) {
+    if (last?.status === 'interrupted' && last.sessionId && (!t.pinnedModel || t.pinnedModel === last.modelId)) {
       const m = this.models.find((x) => x.id === last.modelId && x.available);
       if (m) return { modelId: m.id, provider: m.provider, model: m.model, effort: m.effort, explanation: `Resuming interrupted session ${last.sessionId.slice(0, 8)} on ${m.label}`, candidates: [], assumptions: [], estTokens: 0 };
     }
@@ -770,6 +835,12 @@ export class Engine {
     if (!final.ok) {
       if (final.errorClass === 'cancelled' && this.shuttingDown) {
         this.emit(runId, { type: 'agent.status', agentId, status: 'interrupted', reason: 'orchestrator shutting down' });
+        return;
+      }
+      if (this.reassigning.delete(agentId)) {
+        this.emit(runId, { type: 'agent.status', agentId, status: 'interrupted', reason: 'model changed by user' });
+        if (!isTerminal(s.tasks[taskId])) this.emit(runId, { type: 'task.status', taskId, status: 'ready', reason: `restarting on ${s.tasks[taskId].pinnedModel ?? 'auto-routed model'}` });
+        this.scheduleTick(runId);
         return;
       }
       if (final.errorClass === 'cancelled' && s.tasks[taskId].status === 'cancelled') {

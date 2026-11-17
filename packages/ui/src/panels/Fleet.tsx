@@ -32,11 +32,12 @@ export function Fleet({ providers, onClose, onRefresh }: { providers?: Providers
           ))}
         </div>
         <div className="eyebrow" style={{ margin: '16px 0 6px' }}>
-          Model catalog (cold-start priors; refined by local history)
+          Model catalog (cold-start priors; refined by local history). Untick models your plan doesn't include.
         </div>
         <table className="cand">
           <thead>
             <tr>
+              <th title="Allow the router to use this model">on</th>
               <th>model</th>
               <th>tier</th>
               <th>RU/1k</th>
@@ -49,7 +50,18 @@ export function Fleet({ providers, onClose, onRefresh }: { providers?: Providers
           </thead>
           <tbody>
             {providers?.models.map((m) => (
-              <tr key={m.id} className={m.available ? '' : 'rej'}>
+              <tr key={m.id} className={m.available ? '' : 'rej'} title={m.unavailableReason}>
+                <td>
+                  <input
+                    type="checkbox"
+                    aria-label={`Enable ${m.label}`}
+                    checked={!m.disabled}
+                    onChange={async (e) => {
+                      await api.setModelEnabled(m.id, e.target.checked);
+                      onRefresh();
+                    }}
+                  />
+                </td>
                 <td className={m.provider === 'codex' ? 'fam-text-openai' : 'fam-text-anthropic'}>{m.label}</td>
                 <td className="mono">{m.tier}</td>
                 <td className="mono">{m.ruPer1kTokens}</td>

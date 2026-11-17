@@ -121,6 +121,10 @@ export interface ModelProfile {
   latencyFactor: number;
   available: boolean;
   unavailableReason?: string;
+  /** Catalog default when the user hasn't chosen (e.g. models not every plan includes). */
+  defaultEnabled?: boolean;
+  /** Turned off by the user (or by default); never routed to. */
+  disabled?: boolean;
 }
 
 export interface CostBreakdown {
@@ -211,6 +215,8 @@ export interface Task extends TaskSpec {
   /** Escalation floor: minimum tier after failures. */
   minTier: number;
   excludedModels: string[];
+  /** Model chosen by the user for this task; bypasses routing. */
+  pinnedModel?: string;
   /** Agents before this index don't count toward retry limits (task was reopened). */
   attemptFloor?: number;
   resultSummary?: string;

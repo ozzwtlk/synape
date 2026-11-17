@@ -129,7 +129,11 @@ export function route(task: Task, ctx: RouterContext): RoutingDecision {
       unit: 'RU',
     };
     let rejectedBecause: string | undefined;
-    if (!m.available) rejectedBecause = m.unavailableReason ?? 'provider unavailable';
+    if (task.pinnedModel) {
+      // User's explicit choice wins over every routing gate except availability.
+      if (m.id !== task.pinnedModel) rejectedBecause = `task pinned to ${task.pinnedModel} by user`;
+      else if (!m.available) rejectedBecause = m.unavailableReason ?? 'provider unavailable';
+    } else if (!m.available) rejectedBecause = m.unavailableReason ?? 'provider unavailable';
     else if (m.tier < task.minTier) rejectedBecause = `below escalation floor (tier ${task.minTier})`;
     else if (task.excludedModels.includes(m.id)) rejectedBecause = 'failed this task before';
     else if (author && m.id === author.id) rejectedBecause = 'is the author (no self-review)';
@@ -148,11 +152,11 @@ export function route(task: Task, ctx: RouterContext): RoutingDecision {
   if (!eligible.length) {
     // Nothing clears the bar: take the most capable model that is otherwise usable.
     fallback = true;
-    const usable = candidates.filter((c) => !c.rejectedBecause || c.rejectedBecause.startsWith('P(success)'));
+    const usable = task.pinnedModel ? [] : candidates.filter((c) => !c.rejectedBecause || c.rejectedBecause.startsWith('P(success)'));
     eligible = usable.length ? [usable.sort((a, b) => b.pSuccess - a.pSuccess)[0]] : [];
     if (eligible.length) assumptions.push('No model met the quality threshold; selected the most capable available model.');
   }
-  if (!eligible.length) throw new Error(`No available model can run task "${task.title}"`);
+  if (!eligible.length) throw new Error(task.pinnedModel ? `Pinned model ${task.pinnedModel} is not available (${candidates.find((c) => c.modelId === task.pinnedModel)?.rejectedBecause ?? 'unknown model'})` : `No available model can run task "${task.title}"`);
 
   eligible.sort((a, b) => a.expected.total - b.expected.total || b.pSuccess - a.pSuccess);
   const pick = eligible[0];
@@ -169,7 +173,8 @@ export function route(task: Task, ctx: RouterContext): RoutingDecision {
     `P(success)≈${pick.pSuccess.toFixed(2)} (${pick.samples ? `${pick.samples} past runs` : 'prior only'}, need ≥${needP.toFixed(2)})`,
     `E[cost] ${Math.round(pick.expected.total)} RU = exec ${Math.round(pick.expected.execution)} + retry ${Math.round(pick.expected.expectedRetry)} + review ${Math.round(pick.expected.verification)} + escalation ${Math.round(pick.expected.expectedEscalation)}`,
   ];
-  if (cheaperRejected.length) parts.push(`cheaper rejected: ${cheaperRejected.join('; ')}`);
+  if (task.pinnedModel) parts.push('model chosen by user (routing bypassed)');
+  else if (cheaperRejected.length) parts.push(`cheaper rejected: ${cheaperRejected.join('; ')}`);
   if (author) parts.push(`independent of author ${labelOf(ctx.models, author.id)}`);
   if (fallback) parts.push('fallback: no model met the bar');
 

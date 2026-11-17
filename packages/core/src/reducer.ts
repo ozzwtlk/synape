@@ -152,6 +152,11 @@ export function applyEvent(s: RunState, e: EventEnvelope): RunState {
       if (t) t.feedback = b.feedback;
       break;
     }
+    case 'task.model': {
+      const t = s.tasks[b.taskId];
+      if (t) t.pinnedModel = b.modelId;
+      break;
+    }
     case 'task.reopened': {
       // Fresh start after a failure that wasn't the task's fault (usage limit, user resume).
       const t = s.tasks[b.taskId];

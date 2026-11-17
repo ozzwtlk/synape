@@ -69,7 +69,7 @@ export function Inspector({ providers, onExpand, expanded }: { providers?: Provi
         </div>
       </header>
       <div className="insp-body scroll">
-        {tab === 'overview' && <Overview s={s} t={task} agent={agent} runId={runId} />}
+        {tab === 'overview' && <Overview s={s} t={task} agent={agent} runId={runId} providers={providers} />}
         {tab === 'activity' && agent && <Activity runId={runId} agent={agent} expanded={expanded} />}
         {tab === 'activity' && !agent && <p className="faint">No agent has run this task yet.</p>}
         {tab === 'artifacts' && <Artifacts s={s} t={task} runId={runId} />}
@@ -100,7 +100,7 @@ function TaskLink({ s, id }: { s: RunState; id: string }) {
   );
 }
 
-function Overview({ s, t, agent, runId }: { s: RunState; t: Task; agent?: Agent; runId: string }) {
+function Overview({ s, t, agent, runId, providers }: { s: RunState; t: Task; agent?: Agent; runId: string; providers?: ProvidersResponse }) {
   const children = Object.values(s.tasks).filter((x) => x.parentTaskId === t.id);
   const dependants = Object.values(s.tasks).filter((x) => x.deps.includes(t.id));
   const reviews = t.reviewIds.map((r) => s.reviews[r]).filter(Boolean);
@@ -255,6 +255,7 @@ function Overview({ s, t, agent, runId }: { s: RunState; t: Task; agent?: Agent;
           )}
         </section>
       )}
+      <ModelPicker runId={runId} t={t} providers={providers} />
       <section className="row" style={{ flexWrap: 'wrap' }}>
         {!['completed', 'failed', 'cancelled'].includes(t.status) && (
           <button className="btn danger sm" onClick={() => api.task(runId, t.id, 'cancel')}>
@@ -268,6 +269,53 @@ function Overview({ s, t, agent, runId }: { s: RunState; t: Task; agent?: Agent;
         )}
       </section>
     </div>
+  );
+}
+
+/** Override the router: pin this task to a model (or back to Auto). */
+function ModelPicker({ runId, t, providers }: { runId: string; t: Task; providers?: ProvidersResponse }) {
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+  const models = (providers?.models ?? []).filter((m) => m.available || m.id === t.pinnedModel);
+  const restarts = t.status === 'running' ? ' (restarts the running agent)' : ['completed', 'failed', 'cancelled'].includes(t.status) && t.kind !== 'plan' && t.kind !== 'orchestrate' ? ' (re-runs the task)' : '';
+  return (
+    <section>
+      <div className="eyebrow" style={{ marginBottom: 6 }}>
+        Model
+      </div>
+      <div className="row">
+        <select
+          className="input"
+          aria-label="Model for this task"
+          disabled={busy}
+          value={t.pinnedModel ?? ''}
+          onChange={async (e) => {
+            setErr('');
+            setBusy(true);
+            try {
+              await api.setTaskModel(runId, t.id, e.target.value || null);
+            } catch (x) {
+              setErr((x as Error).message);
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          <option value="">Auto (router decides)</option>
+          {models.map((m) => (
+            <option key={m.id} value={m.id}>
+              {m.label}
+              {m.effort ? ` · ${m.effort}` : ''}
+            </option>
+          ))}
+        </select>
+      </div>
+      <p className="faint" style={{ fontSize: 11, margin: '4px 0 0' }}>
+        {t.pinnedModel ? 'Pinned by you; routing gates are bypassed.' : 'Pick a model to override the router'}
+        {restarts}
+      </p>
+      {err && <p style={{ color: 'var(--bad)', fontSize: 12 }}>{err}</p>}
+    </section>
   );
 }
 

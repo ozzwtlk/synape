@@ -129,6 +129,24 @@ export function startServer(opts: ServerOptions) {
         else engine.retryTask(r[1], r[2]);
         return json(res, 200, { ok: true });
       }
+      if ((r = m(/^\/api\/runs\/([\w-]+)\/tasks\/([\w-]+)\/model$/)) && method === 'POST') {
+        const b = await readBody(req);
+        try {
+          engine.setTaskModel(r[1], r[2], b.modelId ? String(b.modelId) : undefined);
+        } catch (e) {
+          return json(res, 400, { error: (e as Error).message });
+        }
+        return json(res, 200, { ok: true });
+      }
+      if (path === '/api/models' && method === 'POST') {
+        const b = await readBody(req);
+        try {
+          engine.setModelEnabled(String(b.modelId), !!b.enabled);
+        } catch (e) {
+          return json(res, 400, { error: (e as Error).message });
+        }
+        return json(res, 200, { ok: true });
+      }
       if ((r = m(/^\/api\/runs\/([\w-]+)\/approvals\/([\w-]+)$/)) && method === 'POST') {
         const b = await readBody(req);
         engine.resolveApproval(r[1], r[2], !!b.approved, b.note);

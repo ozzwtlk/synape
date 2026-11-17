@@ -29,6 +29,7 @@ export type EventBody =
   | { type: 'task.routed'; taskId: string; decision: RoutingDecision }
   | { type: 'task.result'; taskId: string; summary: string; verified?: boolean }
   | { type: 'task.feedback'; taskId: string; feedback: string }
+  | { type: 'task.model'; taskId: string; modelId?: string }
   | { type: 'task.reopened'; taskId: string; status: TaskStatus; reason: string }
   | { type: 'task.escalated'; taskId: string; fromModel: string; minTier: number; excludeModel?: string; reason: string }
   | { type: 'agent.spawned'; agentId: string; taskId: string; parentAgentId?: string; role: AgentRole; provider: ProviderId; model: string; modelId: string; effort?: string; depth: number; attempt: number }
