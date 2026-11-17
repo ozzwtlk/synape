@@ -201,5 +201,14 @@ export function startServer(opts: ServerOptions) {
   }
 
   server.listen(opts.port, host);
-  return { server, token, close: () => new Promise<void>((r) => server.close(() => r())) };
+  // SSE streams are long-lived: drop open connections so shutdown never hangs on a browser tab.
+  return {
+    server,
+    token,
+    close: () =>
+      new Promise<void>((r) => {
+        server.close(() => r());
+        server.closeAllConnections();
+      }),
+  };
 }
