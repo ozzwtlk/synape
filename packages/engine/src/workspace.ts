@@ -4,6 +4,19 @@ import { execText } from './adapters/proc.ts';
 
 const git = (cwd: string, ...args: string[]) => execText('git', args, cwd, 60_000);
 
+/**
+ * Commits use the user's configured git identity. Only when none is configured
+ * (e.g. CI) do we fall back to a neutral local identity, so integration never
+ * fails silently.
+ */
+async function identityArgs(cwd: string): Promise<string[]> {
+  const [n, e] = await Promise.all([git(cwd, 'config', 'user.name'), git(cwd, 'config', 'user.email')]);
+  const out: string[] = [];
+  if (!n.stdout.trim()) out.push('-c', 'user.name=Synape');
+  if (!e.stdout.trim()) out.push('-c', 'user.email=synape@localhost');
+  return out;
+}
+
 export interface RepoInfo {
   isRepo: boolean;
   root?: string;
@@ -144,11 +157,11 @@ export class Worktrees {
     const files = await this.changedFiles(taskPath);
     if (files.length) {
       await git(taskPath, 'add', '-A');
-      const c = await git(taskPath, 'commit', '-m', message);
+      const c = await git(taskPath, ...(await identityArgs(taskPath)), 'commit', '-m', message);
       if (c.code !== 0) return { ok: false, conflict: c.stderr || c.stdout };
     }
     const ip = this.integrationPath(runId);
-    const m = await git(ip, 'merge', '--no-ff', '-m', `Merge ${branch}`, branch);
+    const m = await git(ip, ...(await identityArgs(ip)), 'merge', '--no-ff', '-m', `Merge ${branch}`, branch);
     if (m.code !== 0) {
       await git(ip, 'merge', '--abort');
       return { ok: false, conflict: (m.stdout + m.stderr).slice(0, 2000) };
