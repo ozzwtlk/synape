@@ -1,0 +1,7 @@
+packages:
+  - packages/*
+minimumReleaseAgeExclude:
+  - '@xyflow/react@13.0.1'
+  - marked@18.2.1
+allowBuilds:
+  esbuild: true

@@ -1,0 +1,26 @@
+{
+  "name": "synape",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Visual, event-sourced, multi-provider AI agent orchestration.",
+  "engines": {
+    "node": ">=23.6"
+  },
+  "scripts": {
+    "dev": "pnpm -r --parallel --filter @synape/engine --filter @synape/ui dev",
+    "build": "pnpm --filter @synape/ui build",
+    "start": "node packages/engine/src/cli.ts serve",
+    "typecheck": "tsc -p packages/core && tsc -p packages/engine && tsc -p packages/ui",
+    "test": "vitest run",
+    "synape": "node packages/engine/src/cli.ts",
+    "screenshot": "node scripts/shot.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "playwright": "1",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  },
+  "packageManager": "pnpm@12.17.0"
+}

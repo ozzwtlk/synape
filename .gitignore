@@ -1,0 +1,6 @@
+node_modules/
+dist/
+.synape/
+*.log
+.team/
+coverage/
