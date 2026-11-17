@@ -3,7 +3,7 @@ import { parseArgs } from 'node:util';
 import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { billableTokens, foldEvents, type EventEnvelope, type PermissionLevel, type RunState } from '@synape/core';
+import { billableTokens, canonicalize, foldEvents, initialState, type EventEnvelope, type PermissionLevel, type RunState } from '@synape/core';
 import { createEngine, dataDir, EventStore, startServer } from './index.ts';
 
 const HELP = `synape — event-sourced multi-provider agent orchestration
@@ -19,6 +19,7 @@ Usage:
   synape ls                                   list runs
   synape status <runId> [--at <seq>]          summarize a run (optionally as of an event seq)
   synape events <runId> [--type t1,t2]        dump the event log as JSON lines
+  synape verify [runId]                       check that replaying the log reproduces the persisted state
 `;
 
 const { values: o, positionals } = parseArgs({
@@ -212,6 +213,18 @@ async function main() {
     const runId = positionals[1];
     const s = o.at ? foldEvents(store.events(runId), undefined, Number(o.at)) : store.state(runId);
     console.log(summarize(s));
+  } else if (cmd === 'verify') {
+    // Event-sourcing invariant: a full replay reproduces the persisted projection.
+    const ids = positionals[1] ? [positionals[1]] : store.listRuns().map((r) => r.id);
+    let ok = true;
+    for (const id of ids) {
+      const persisted = store.state(id);
+      const replayed = foldEvents(store.events(id), initialState(id));
+      const same = JSON.stringify(canonicalize(replayed)) === JSON.stringify(canonicalize(persisted));
+      ok &&= same;
+      console.log(`${same ? '✓' : '✗'} ${id}  ${persisted.lastSeq} events  replay ${same ? '==' : '!='} persisted state`);
+    }
+    process.exitCode = ok ? 0 : 1;
   } else if (cmd === 'events') {
     for (const e of store.events(positionals[1], 0, 1e9, o.type?.split(','))) console.log(JSON.stringify(e));
   } else console.log(HELP);

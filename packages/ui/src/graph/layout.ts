@@ -52,44 +52,59 @@ function childrenMap(tasks: Task[]) {
   return m;
 }
 
-/** Radial "orbital" hierarchy: orchestrators at the core, workers in rings. */
+/**
+ * Nested orbital systems: every orchestrator is a "sun" whose delegated tasks
+ * orbit it on a local ring; sub-orchestrators carry their own systems. The
+ * hierarchy is therefore readable from spatial grouping alone.
+ */
 function orbit(tasks: Task[]): Map<string, Pt> {
   const pos = new Map<string, Pt>();
   const kids = childrenMap(tasks);
-  const weight = new Map<string, number>();
-  const w = (t: Task): number => {
+  const reviewsOf = new Map<string, number>();
+  for (const t of tasks) if (t.reviewOf) reviewsOf.set(t.reviewOf, (reviewsOf.get(t.reviewOf) ?? 0) + 1);
+  const LEAF = 122; // radius a leaf (+ its review satellites) needs
+  const radiusOf = new Map<string, number>(); // extent of a node's whole system
+  const ringOf = new Map<string, number>(); // radius of its children's orbit
+  const measure = (t: Task): number => {
     const c = kids.get(t.id) ?? [];
-    const v = Math.max(1, c.reduce((a, k) => a + w(k), 0));
-    weight.set(t.id, v);
-    return v;
+    const own = LEAF + (reviewsOf.get(t.id) ? 40 : 0);
+    if (!c.length) {
+      radiusOf.set(t.id, own);
+      return own;
+    }
+    const sizes = c.map(measure);
+    const circumference = sizes.reduce((a, r) => a + 2 * r + 16, 0);
+    const ring = Math.max(own + Math.max(...sizes) * 0.8, circumference / (2 * Math.PI));
+    ringOf.set(t.id, ring);
+    const r = ring + Math.max(...sizes);
+    radiusOf.set(t.id, r);
+    return r;
+  };
+  const GAP = 0.35; // radians kept free toward the parent's incoming edge
+  const place = (t: Task, x: number, y: number, outward: number | null) => {
+    pos.set(t.id, { x, y });
+    const c = kids.get(t.id) ?? [];
+    if (!c.length) return;
+    const ring = ringOf.get(t.id)! * (outward === null ? 1 : (2 * Math.PI) / (2 * Math.PI - 2 * GAP));
+    orbitRings.set(t.id, { x, y, r: ring });
+    const weights = c.map((k) => 2 * radiusOf.get(k.id)! + 16);
+    const total = weights.reduce((a, b) => a + b, 0);
+    const span = outward === null ? 2 * Math.PI : 2 * Math.PI - 2 * GAP;
+    let a = outward === null ? -Math.PI / 2 : outward - span / 2;
+    c.forEach((k, i) => {
+      const share = (span * weights[i]) / total;
+      const mid = a + share / 2;
+      place(k, x + Math.cos(mid) * ring, y + Math.sin(mid) * ring, mid);
+      a += share;
+    });
   };
   const roots = kids.get(undefined) ?? [];
-  roots.forEach(w);
-  const depthCount = new Map<number, number>();
-  const countDepth = (t: Task, d: number) => {
-    depthCount.set(d, (depthCount.get(d) ?? 0) + 1);
-    for (const k of kids.get(t.id) ?? []) countDepth(k, d + 1);
-  };
-  roots.forEach((r) => countDepth(r, 0));
-  const radius = (d: number) => (d === 0 ? 0 : Math.max(400 * d, ((depthCount.get(d) ?? 1) * 290) / (2 * Math.PI)));
-
-  const place = (t: Task, d: number, a0: number, a1: number) => {
-    const mid = (a0 + a1) / 2;
-    const r = radius(d);
-    pos.set(t.id, { x: Math.cos(mid) * r, y: Math.sin(mid) * r });
-    const c = kids.get(t.id) ?? [];
-    const total = c.reduce((a, k) => a + weight.get(k.id)!, 0) || 1;
-    // Children of non-root clusters fan out within (slightly widened) parent wedge.
-    const span = d === 0 ? a1 - a0 : Math.min(a1 - a0 + 0.35, Math.PI * 1.2);
-    let a = d === 0 ? a0 : mid - span / 2;
-    for (const k of c) {
-      const da = (span * weight.get(k.id)!) / total;
-      place(k, d + 1, a, a + da);
-      a += da;
-    }
-  };
-  const rootSpan = (2 * Math.PI) / Math.max(1, roots.length);
-  roots.forEach((r, i) => place(r, 0, -Math.PI / 2 + i * rootSpan, -Math.PI / 2 + (i + 1) * rootSpan));
+  let ox = 0;
+  for (const r of roots) {
+    const rad = measure(r);
+    place(r, ox + rad, 0, null);
+    ox += 2 * rad + 80;
+  }
   placeReviews(tasks, pos, 'orbit');
   return pos;
 }
@@ -152,17 +167,22 @@ function placeReviews(tasks: Task[], pos: Map<string, Pt>, mode: LayoutMode) {
     seen.set(t.reviewOf, i + 1);
     if (mode === 'flow') pos.set(t.id, { x: p.x + 24 + i * 16, y: p.y + 80 + i * 54 });
     else {
-      // Satellites on an outer orbit, fanned along the tangent.
-      const len = Math.hypot(p.x, p.y) || 1;
-      const ux = p.x / len;
-      const uy = p.y / len;
-      const off = (i - 0.5) * 70;
-      pos.set(t.id, { x: p.x + ux * 190 - uy * off, y: p.y + uy * 150 + ux * off });
+      // Satellites just outside their target, away from its orchestrator, stacked.
+      const parent = tasks.find((x) => x.id === tasks.find((y) => y.id === t.reviewOf)?.parentTaskId);
+      const pp = parent ? pos.get(parent.id) : undefined;
+      const dx = pp ? p.x - pp.x : p.x;
+      const dy = pp ? p.y - pp.y : p.y;
+      const len = Math.hypot(dx, dy) || 1;
+      pos.set(t.id, { x: p.x + (dx / len) * 185 + (dx >= 0 ? 20 : -20), y: p.y + (dy / len) * 100 + (i - 0.5) * 50 });
     }
   }
 }
 
+/** Orbit tracks (centre + radius) of each orchestrator, filled by the orbit layout. */
+export const orbitRings = new Map<string, { x: number; y: number; r: number }>();
+
 export function layout(tasks: Task[], mode: LayoutMode): Map<string, Pt> {
+  orbitRings.clear();
   const pos = mode === 'orbit' ? orbit(tasks) : flow(tasks);
   // Convert centers to top-left anchors.
   const out = new Map<string, Pt>();

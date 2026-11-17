@@ -5,7 +5,7 @@
 <p align="center"><b>A visual, event-sourced orchestration engine for Claude Code and Codex agents.</b><br>
 Describe an objective; watch a hierarchy of agents plan, delegate, execute, cross-check and synthesize it in a live graph.</p>
 
-![Synape: a completed run in the orbit view](docs/screenshots/run-orbit.png)
+![A real hierarchical run: root orchestrator, two sub-orchestrator systems, workers and cross-family review satellites](docs/screenshots/hierarchy-orbit.png)
 
 ## What it does
 
@@ -16,6 +16,15 @@ Describe an objective; watch a hierarchy of agents plan, delegate, execute, cros
 - **Event-sourced.** One append-only log drives the scheduler, the live graph, the resource dashboard, time-travel replay and crash recovery, all through the same reducer.
 - **Honest accounting.** Exact tokens (including cache read and write) per agent, task and provider. Claude's subscription windows are shown as reported. Costs appear only where a provider reports them, labelled for what they are.
 - **Safe by construction.** Permission ceilings with approvals, provider-enforced tool allowlists and sandboxes, git worktree isolation, a boundary audit of your checkout, and approval-gated merge, push and PR.
+
+## Screenshots
+
+All screenshots come from real runs; nothing is mocked.
+
+| | |
+|---|---|
+| ![Flow layout](docs/screenshots/hierarchy-flow.png) **Flow**: the same run, layered by dependency | ![Routing](docs/screenshots/routing.png) **Routing**: why a light model got the extraction task |
+| ![Replay](docs/screenshots/replay.png) **Time travel**: the run at event 520 of 946 | ![Resources](docs/screenshots/resources.png) **Resources**: tokens, cache, subscription windows |
 
 ## Requirements
 
@@ -86,6 +95,8 @@ The model catalog with its skill priors and resource weights is in `packages/cor
 ## Example: a real run
 
 The screenshot above is a real run on a small Python library. Codex `gpt-6.1-sol` planned it. A light `gpt-6-luna` extracted the API, Codex wrote the fixes and tests in isolated worktrees, every critical task was cross-checked by Claude Sonnet (which re-ran pytest itself: 51 passed), and Claude Haiku wrote the final synthesis. That came to 12 agents and 195k tokens (+495k cache reads), with 20% of tokens spent on verification and 12% on retries. Verified work was merged into the local branch `synape/<run>`, and nothing touched the user's branch.
+
+A second real run used two **sub-orchestrators** (documentation and robustness), 26 agents and 946 events. The server was **hard-killed (SIGKILL) mid-run** and restarted: recovery killed the orphaned agent process, marked the agents interrupted, and resumed both provider sessions with a 152-character continuation prompt. `synape verify` confirms that replaying the log reproduces the persisted state exactly. Its reviewers also found a real engine bug: execute-level reviewers were placed in a fresh worktree and could not see the author's changes. They refused to pass the work, the final report stated that neither workstream was fully accepted, and the bug is now fixed with a regression test.
 
 See [docs/WORKFLOWS.md](docs/WORKFLOWS.md) for more workflows, including a research literature-review scenario.
 

@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { foldEvents, initialState, type ModelProfile, type RunState } from '@synape/core';
+import { canonicalize, foldEvents, initialState, type ModelProfile, type RunState } from '@synape/core';
 import { Engine } from '../src/engine.ts';
 import { EventStore } from '../src/store.ts';
 import { ScriptedAdapter, isPlan, isReview, isSynth, plannedTask, type Script } from './fakes.ts';
@@ -251,7 +251,7 @@ describe('engine', () => {
     expect(two.a.calls.concat(two.b.calls).some((c) => c.resumeSessionId?.startsWith('sess-'))).toBe(true);
     // Full replay from the event log reproduces the live state exactly.
     const replayed = foldEvents(two.store.events(runId), initialState(runId));
-    expect(JSON.stringify(replayed)).toEqual(JSON.stringify(two.engine.state(runId)));
+    expect(canonicalize(replayed)).toEqual(canonicalize(two.engine.state(runId)));
   });
 
   it('follow-up instructions extend a completed run with new tasks and a new synthesis', async () => {

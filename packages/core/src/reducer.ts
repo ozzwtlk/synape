@@ -314,3 +314,16 @@ export function foldEvents(events: Iterable<EventEnvelope>, from?: RunState, upt
   }
   return s;
 }
+
+/** Key-order-independent form of a state, for equality checks (replay vs persisted). */
+export function canonicalize(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map(canonicalize);
+  if (v && typeof v === 'object')
+    return Object.fromEntries(
+      Object.keys(v)
+        .sort()
+        .filter((k) => (v as any)[k] !== undefined)
+        .map((k) => [k, canonicalize((v as any)[k])]),
+    );
+  return v;
+}

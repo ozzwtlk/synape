@@ -900,3 +900,22 @@ input[type='range'] {
     display: none;
   }
 }
+.orbit-track {
+  fill: rgba(140, 120, 255, 0.025);
+  stroke: rgba(184, 166, 255, 0.3);
+  stroke-width: 1.6;
+  stroke-dasharray: 3 10;
+  vector-effect: non-scaling-stroke;
+}
+.orbit-track.live {
+  stroke: rgba(184, 166, 255, 0.6);
+  fill: rgba(140, 120, 255, 0.05);
+}
+.graph.animated .orbit-track.live {
+  animation: track 30s linear infinite;
+}
+@keyframes track {
+  to {
+    stroke-dashoffset: -220;
+  }
+}

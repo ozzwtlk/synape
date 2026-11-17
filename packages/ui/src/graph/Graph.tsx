@@ -1,14 +1,22 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ReactFlow, MiniMap, Controls, Panel, useReactFlow, type NodeMouseHandler } from '@xyflow/react';
+import { ReactFlow, MiniMap, Controls, Panel, useReactFlow, type Node, type NodeMouseHandler } from '@xyflow/react';
 import type { RunState, Task } from '@synape/core';
 import { TaskNode, type TaskFlowNode } from './TaskNode';
 import { EdgeDefs, SynapseEdge, type SynapseFlowEdge } from './SynapseEdge';
 import { Starfield } from './Starfield';
-import { layout, visibleTasks, type LayoutMode } from './layout';
+import { layout, orbitRings, visibleTasks, type LayoutMode } from './layout';
 import { getStore, select, useStore, viewState } from '../store';
 import { familyOfProvider, isActive, latestAgent, tokensOf } from '../util';
 
-const nodeTypes = { task: TaskNode };
+function OrbitTrack({ data }: { data: { r: number; live: boolean; dim: boolean } }) {
+  const d = data.r * 2;
+  return (
+    <svg width={d} height={d} style={{ overflow: 'visible', pointerEvents: 'none', opacity: data.dim ? 0.15 : 1 }} aria-hidden>
+      <circle cx={data.r} cy={data.r} r={data.r} className={`orbit-track ${data.live ? 'live' : ''}`} />
+    </svg>
+  );
+}
+const nodeTypes = { task: TaskNode, orbit: OrbitTrack };
 const edgeTypes = { synapse: SynapseEdge };
 const PULSE_MS = 1400;
 
@@ -58,8 +66,8 @@ export function Graph() {
 
   const selectedTaskId = selection ? (selection.kind === 'task' ? selection.id : state?.agents[selection.id]?.taskId) : undefined;
 
-  const { nodes, edges, activeCount, structureKey } = useMemo(() => {
-    if (!state) return { nodes: [] as TaskFlowNode[], edges: [] as SynapseFlowEdge[], activeCount: 0, structureKey: '' };
+  const { nodes, edges, activeCount, structureKey, rings } = useMemo(() => {
+    if (!state) return { nodes: [] as TaskFlowNode[], edges: [] as SynapseFlowEdge[], activeCount: 0, structureKey: '', rings: [] as { id: string; x: number; y: number; r: number; live: boolean; dim: boolean }[] };
     const tasks = visibleTasks(state, collapsed);
     const pos = layout(tasks, mode);
     const visible = new Set(tasks.map((t) => t.id));
@@ -124,7 +132,8 @@ export function Graph() {
       }
     }
     const structureKey = `${mode}|${tasks.length}|${[...collapsed].join(',')}`;
-    return { nodes, edges, activeCount, structureKey };
+    const rings = [...orbitRings].map(([id, r]) => ({ id, ...r, live: tasks.some((k) => k.parentTaskId === id && isActive(latestAgent(state, k))), dim: !!near && !near.has(id) }));
+    return { nodes, edges, activeCount, structureKey, rings };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state, version, collapsed, mode, selectedTaskId, focusMode, animate, cursor, tick, toggle]);
 
@@ -151,7 +160,15 @@ export function Graph() {
     rf.fitView({ nodes: [{ id: selectedTaskId }], padding: 1.4, duration: animate ? 600 : 0, maxZoom: 1.25 });
   }, [focusSeq]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const onNodeClick: NodeMouseHandler = useCallback((_, n) => select({ kind: 'task', id: n.id }), []);
+  const allNodes = useMemo(() => {
+    if (mode !== 'orbit') return nodes as Node[];
+    const tracks: Node[] = rings.map((r) => ({ id: `orbit:${r.id}`, type: 'orbit', position: { x: r.x - r.r, y: r.y - r.r }, data: r, selectable: false, draggable: false, focusable: false, zIndex: -1, style: { pointerEvents: 'none' } }));
+    return [...tracks, ...(nodes as Node[])];
+  }, [nodes, rings, mode]);
+
+  const onNodeClick: NodeMouseHandler = useCallback((_, n) => {
+    if (n.type === 'task') select({ kind: 'task', id: n.id });
+  }, []);
 
   if (!state) return <div className="graph-empty" />;
   return (
@@ -159,7 +176,7 @@ export function Graph() {
       <Starfield activity={activeCount} enabled={animate} />
       <EdgeDefs />
       <ReactFlow
-        nodes={nodes}
+        nodes={allNodes}
         edges={edges}
         nodeTypes={nodeTypes}
         edgeTypes={edgeTypes}
@@ -180,6 +197,7 @@ export function Graph() {
           className="minimap"
           maskColor="rgba(3,5,11,0.72)"
           nodeColor={(n) => {
+            if (n.type !== 'task') return 'transparent';
             const d = n.data as TaskFlowNode['data'];
             if (d.task.status === 'failed') return '#ff5c7a';
             if (d.task.kind === 'plan' || d.task.kind === 'orchestrate') return '#b8a6ff';
