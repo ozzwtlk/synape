@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ReactFlow, MiniMap, Controls, Panel, useReactFlow, type Node, type NodeMouseHandler } from '@xyflow/react';
 import type { RunState, Task } from '@synape/core';
-import { ComputeNode, TaskNode, type ComputeFlowNode, type TaskFlowNode } from './TaskNode';
+import { C, ComputeNode, TaskNode, type ComputeFlowNode, type KidMark, type TaskFlowNode } from './TaskNode';
 import { EdgeDefs, SynapseEdge, type SynapseFlowEdge } from './SynapseEdge';
 import { Starfield } from './Starfield';
 import { computeId, layout, orbitRings, visibleTasks, type LayoutMode } from './layout';
@@ -73,7 +73,17 @@ export function Graph() {
     const visible = new Set(tasks.map((t) => t.id));
     const near = focusMode && selectedTaskId ? neighborhood(state, selectedTaskId) : null;
     const childCount = new Map<string, number>();
-    for (const t of Object.values(state.tasks)) if (t.parentTaskId) childCount.set(t.parentTaskId, (childCount.get(t.parentTaskId) ?? 0) + 1);
+    const kidsOf = new Map<string, KidMark[]>();
+    for (const t of Object.values(state.tasks)) {
+      if (!t.parentTaskId) continue;
+      childCount.set(t.parentTaskId, (childCount.get(t.parentTaskId) ?? 0) + 1);
+      if (t.kind === 'review') continue;
+      const ka = latestAgent(state, t);
+      const kfam = familyOfProvider(ka?.provider);
+      const color = t.kind === 'orchestrate' ? C.nucleus : kfam === 'anthropic' ? C.ember : kfam === 'openai' ? C.ion : C.idle;
+      kidsOf.set(t.parentTaskId, [...(kidsOf.get(t.parentTaskId) ?? []), { id: t.id, status: t.status, verified: t.verified, color, tokens: tokensOf(t.usage), live: isActive(ka) }]);
+    }
+    const FIG = /\.(png|jpe?g|gif|webp|svg|pdf|eps)$/i;
     let activeCount = 0;
     const nodes: (TaskFlowNode | ComputeFlowNode)[] = tasks.map((t): TaskFlowNode => {
       const a = latestAgent(state, t);
@@ -81,12 +91,14 @@ export function Graph() {
       const running = a && isActive(a) ? a.toolCalls.filter((c) => !c.endedAt).map((c) => c.name) : [];
       const activeTools = running.length ? running.join(', ') : isActive(a) && a?.toolCalls.length ? `${a.toolCalls.at(-1)!.name} · ${a.toolCount} tools` : null;
       const dim = !!near && !near.has(t.id);
-      const sig = [Object.keys(t.computes ?? {}).length, t.status, t.verified, t.attempts, tokensOf(t.usage), a?.id, a?.status, a?.toolCount, a?.usage.peakContextTokens, activeTools, collapsed.has(t.id), childCount.get(t.id), dim, t.title, t.resultSummary?.slice(0, 12)].join('|');
+      const kids = kidsOf.get(t.id) ?? [];
+      const figures = (t.outputs ?? []).filter((f) => FIG.test(f.rel)).length;
+      const sig = [kids.map((k) => `${k.status[0]}${k.live ? 1 : 0}${k.verified ? 1 : 0}${Math.round(Math.log2(1 + k.tokens))}`).join(''), figures, a?.endedAt, Object.keys(t.computes ?? {}).length, t.status, t.verified, t.attempts, tokensOf(t.usage), a?.id, a?.status, a?.toolCount, a?.usage.peakContextTokens, activeTools, collapsed.has(t.id), childCount.get(t.id), dim, t.title, t.resultSummary?.slice(0, 12)].join('|');
       return {
         id: t.id,
         type: 'task',
         position: pos.get(t.id)!,
-        data: { task: t, agent: a, childCount: childCount.get(t.id) ?? 0, collapsed: collapsed.has(t.id), activeTools, sig, dim, animate, onToggle: toggle },
+        data: { task: t, agent: a, kids, figures, childCount: childCount.get(t.id) ?? 0, collapsed: collapsed.has(t.id), activeTools, sig, dim, animate, onToggle: toggle },
         selected: t.id === selectedTaskId,
       };
     });

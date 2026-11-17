@@ -35,6 +35,7 @@ import {
   SYSTEM_WORKER,
   extractDelegation,
   extractSummary,
+  extractTldr,
   parseStructured,
   planPrompt,
   replanPrompt,
@@ -45,6 +46,7 @@ import {
   type PlannedTask,
 } from './prompts.ts';
 import { Worktrees, repoInfo } from './workspace.ts';
+import { modifiedSince, snapshotFigures } from './outputs.ts';
 import { execText } from './adapters/proc.ts';
 
 export interface EngineOptions {
@@ -523,7 +525,7 @@ export class Engine {
       if (!synth) continue;
       if (synth.status === 'completed') {
         const allVerified = kids.filter((k) => k.kind === 'work' || k.kind === 'orchestrate').every((k) => k.verified || k.verification === 'none');
-        this.emit(runId, { type: 'task.result', taskId: t.id, summary: synth.resultSummary ?? '', verified: allVerified });
+        this.emit(runId, { type: 'task.result', taskId: t.id, summary: synth.resultSummary ?? '', tldr: synth.resultTldr, verified: allVerified });
         this.emit(runId, { type: 'task.status', taskId: t.id, status: 'completed', reason: 'all delegated work settled' });
       } else this.emit(runId, { type: 'task.status', taskId: t.id, status: 'failed', reason: `synthesis ${synth.status}` });
     }
@@ -536,7 +538,7 @@ export class Engine {
       if (run.status !== status) {
         if (status === 'completed') {
           const final = run.finalArtifactId ? s.artifacts[run.finalArtifactId] : undefined;
-          this.emit(runId, { type: 'chat.message', messageId: id('msg'), from: 'orchestrator', text: `Run complete.\n\n${root.resultSummary ?? ''}${final ? `\n\nFull report: ${final.path}` : ''}`, refs: [root.id] });
+          this.emit(runId, { type: 'chat.message', messageId: id('msg'), from: 'orchestrator', text: `Run complete.\n\n${root.resultTldr ? `**TL;DR**\n${root.resultTldr}` : (root.resultSummary ?? '')}${final ? `\n\nFull report: ${final.path}` : ''}`, refs: [root.id] });
         }
         this.emit(runId, { type: 'run.status', status, reason: root.statusReason });
       }
@@ -743,6 +745,20 @@ export class Engine {
    * Audit: agents work in worktrees, so the user's checkout must not change
    * during a run. Any change is reported (never silently reverted).
    */
+  /** Record what the agent produced (files modified in its working dir while it ran) and snapshot figures. */
+  private collectOutputs(runId: string, taskId: string, agentId: string, cwd: string) {
+    try {
+      const a = this.state(runId).agents[agentId];
+      if (!a) return;
+      const files = modifiedSince(cwd, a.startedAt - 1000);
+      if (!files.length) return;
+      snapshotFigures(files, join(this.artifactDir(runId, taskId), 'outputs', agentId.slice(-6)));
+      this.emit(runId, { type: 'task.outputs', taskId, agentId, root: cwd, files });
+    } catch (e) {
+      this.log(`output scan failed: ${(e as Error).message}`);
+    }
+  }
+
   private async auditBoundary(runId: string, agentId: string) {
     const ws = this.state(runId).run.workspace;
     const now = await this.checkoutStatus(ws);
@@ -830,6 +846,7 @@ export class Engine {
       }
     }
     await this.auditBoundary(runId, agentId).catch(() => {});
+    if (perm !== 'read') this.collectOutputs(runId, taskId, agentId, cwd);
     s = this.state(runId);
     if (!final) final = { kind: 'final', ok: false, text: '', error: 'adapter ended without a result', errorClass: 'provider' };
     if (!final.ok) {
@@ -978,9 +995,9 @@ export class Engine {
       this.emit(runId, { type: 'chat.message', messageId: id('msg'), from: 'system', text: `${a?.provider ?? 'Provider'} usage limit reached (${error.slice(0, 160)}). Run paused; it will auto-resume at ${when}, or press Resume to try sooner.` });
       this.emit(runId, { type: 'run.status', status: 'paused', reason: `${a?.provider ?? 'provider'} usage limit; auto-resume at ${when}`, resumeAt });
       this.armAutoResume(runId, resumeAt);
-    } else if (s.run.status === 'paused' && s.run.resumeAt && resumeAt > s.run.resumeAt) {
-      // Already paused for another provider's limit: wait for the later reset.
-      this.emit(runId, { type: 'run.status', status: 'paused', reason: `${s.run.statusReason ?? 'usage limit'}; extended to ${new Date(resumeAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`, resumeAt });
+    } else if (s.run.status === 'paused' && s.run.resumeAt && resumeAt > s.run.resumeAt + 60_000) {
+      // Already paused for another limit: wait for the later reset.
+      this.emit(runId, { type: 'run.status', status: 'paused', reason: `usage limits (${a?.provider ?? 'provider'} latest); auto-resume at ${new Date(resumeAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`, resumeAt });
       this.armAutoResume(runId, resumeAt);
     }
   }
@@ -1035,7 +1052,7 @@ export class Engine {
       case 'synthesize': {
         const art = this.writeArtifact(runId, t.id, agentId, 'report', 'report.md', t.title, text, extractSummary(text));
         this.emit(runId, { type: 'agent.status', agentId, status: 'completed' });
-        this.emit(runId, { type: 'task.result', taskId: t.id, summary: extractSummary(text) });
+        this.emit(runId, { type: 'task.result', taskId: t.id, summary: extractSummary(text), tldr: extractTldr(text) });
         this.emit(runId, { type: 'task.status', taskId: t.id, status: 'completed' });
         void art;
         return;

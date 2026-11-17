@@ -3,6 +3,7 @@ import type {
   AgentStatus,
   Approval,
   Artifact,
+  OutputFile,
   ProviderId,
   ReviewVerdict,
   RoutingDecision,
@@ -27,7 +28,8 @@ export type EventBody =
   | { type: 'task.deps'; taskId: string; deps: string[] }
   | { type: 'task.status'; taskId: string; status: TaskStatus; reason?: string }
   | { type: 'task.routed'; taskId: string; decision: RoutingDecision }
-  | { type: 'task.result'; taskId: string; summary: string; verified?: boolean }
+  | { type: 'task.result'; taskId: string; summary: string; verified?: boolean; tldr?: string }
+  | { type: 'task.outputs'; taskId: string; agentId: string; root: string; files: OutputFile[] }
   | { type: 'task.feedback'; taskId: string; feedback: string }
   | { type: 'task.model'; taskId: string; modelId?: string }
   | { type: 'task.reopened'; taskId: string; status: TaskStatus; reason: string }

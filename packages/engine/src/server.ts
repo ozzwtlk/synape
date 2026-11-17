@@ -1,10 +1,24 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomBytes } from 'node:crypto';
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { extname, join, resolve, sep } from 'node:path';
+import { findPdfs, inferOutputs, texGraphics } from './outputs.ts';
 import { homedir } from 'node:os';
 import type { Engine } from './engine.ts';
 import { repoInfo } from './workspace.ts';
+
+/** Types for agent-produced files. Never text/html: those are shown as source. */
+const FILE_MIME: Record<string, string> = {
+  '.pdf': 'application/pdf',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.svg': 'image/svg+xml',
+};
 
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -42,6 +56,15 @@ export function startServer(opts: ServerOptions) {
   // Vite dev server proxies with its own host.
   for (const p of (process.env.SYNAPE_ALLOWED_HOSTS ?? 'localhost:5173,127.0.0.1:5173').split(',')) allowedHosts.add(p);
 
+  const worktreesOf = (runId: string) => {
+    const d = join(engine.dataDir, 'worktrees', runId);
+    try {
+      return readdirSync(d).map((x) => join(d, x));
+    } catch {
+      return [];
+    }
+  };
+  const outputsCache = new Map<string, { seq: number; at: number; body: unknown }>();
   const json = (res: ServerResponse, code: number, body: unknown) => {
     res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store' });
     res.end(JSON.stringify(body));
@@ -158,6 +181,28 @@ export function startServer(opts: ServerOptions) {
         await engine.requestGitAction(r[1], b.kind);
         return json(res, 202, { ok: true });
       }
+      if ((r = m(/^\/api\/runs\/([\w-]+)\/outputs$/))) {
+        const s = engine.state(r[1]);
+        // Walking a workspace is not free: reuse for 20 s unless the run moved on.
+        const hit = outputsCache.get(r[1]);
+        if (hit && hit.seq === s.lastSeq && Date.now() - hit.at < 20_000) return json(res, 200, hit.body);
+        const recorded: Record<string, unknown> = {};
+        for (const t of Object.values(s.tasks)) if (t.outputs?.length) recorded[t.id] = t.outputs;
+        const ws = s.run.workspace;
+        const body = {
+          recorded,
+          inferred: inferOutputs(s, join(engine.dataDir, 'worktrees')),
+          // The manuscript may be compiled in the user's checkout or in an agent worktree.
+          pdfs: [ws, ...worktreesOf(r[1])].filter(existsSync).flatMap((d) => findPdfs(d, 30)).sort((a, b) => b.mtime - a.mtime).slice(0, 80),
+          tex: existsSync(ws) ? texGraphics(ws) : { names: [], texFiles: [], mains: [], figures: [] },
+        };
+        outputsCache.set(r[1], { seq: s.lastSeq, at: Date.now(), body });
+        return json(res, 200, body);
+      }
+      if ((r = m(/^\/api\/runs\/([\w-]+)\/file$/))) {
+        const page = url.searchParams.get('page');
+        return serveRunFile(res, r[1], url.searchParams.get('path') ?? '', url.searchParams.has('thumb') || !!page, page ? Math.max(1, Math.min(2000, Number(page) || 1)) : 1, page ? 1400 : 420);
+      }
       if (path === '/api/git') {
         const p = resolve(url.searchParams.get('path') ?? process.cwd());
         return json(res, 200, await repoInfo(p, true));
@@ -200,6 +245,49 @@ export function startServer(opts: ServerOptions) {
       clearInterval(hb);
       unsub();
     });
+  }
+
+  /**
+   * Files an agent produced, confined to the run's workspace, its worktrees and
+   * its artifact dir (symlinks resolved). Untrusted content: no HTML, nosniff,
+   * and a sandbox CSP for anything but PDFs (Chrome's viewer refuses sandboxing).
+   */
+  function serveRunFile(res: ServerResponse, runId: string, p: string, thumb: boolean, page = 1, width = 420) {
+    const s = engine.state(runId);
+    if (!s.run.workspace || !p) return json(res, 404, { error: 'not found' });
+    let real: string;
+    try {
+      real = realpathSync(resolve(p));
+    } catch {
+      return json(res, 404, { error: 'not found' });
+    }
+    const roots = [s.run.workspace, join(engine.dataDir, 'artifacts', runId), join(engine.dataDir, 'worktrees', runId)].filter(existsSync).map((d) => realpathSync(d));
+    if (!roots.some((d) => real === d || real.startsWith(d + sep))) return json(res, 403, { error: 'outside the run workspace' });
+    const st = statSync(real);
+    if (!st.isFile()) return json(res, 404, { error: 'not a file' });
+    const ext = extname(real).toLowerCase();
+    const headers: Record<string, string> = { 'x-content-type-options': 'nosniff', 'cache-control': 'no-cache' };
+    if (thumb && ext === '.pdf') {
+      // First page as PNG via poppler, cached by path+mtime.
+      const dir = join(engine.dataDir, 'thumbs');
+      mkdirSync(dir, { recursive: true });
+      const key = createHash('sha1').update(`${real}:${st.mtimeMs}:${page}:${width}`).digest('hex');
+      const png = join(dir, `${key}.png`);
+      if (!existsSync(png)) {
+        try {
+          execFileSync('pdftoppm', ['-png', '-singlefile', '-f', String(page), '-l', String(page), '-scale-to', String(width), real, join(dir, key)], { timeout: 20000, stdio: 'ignore' });
+        } catch {
+          return json(res, 404, { error: 'no such page, or pdftoppm unavailable' });
+        }
+      }
+      res.writeHead(200, { ...headers, 'content-type': 'image/png' });
+      return res.end(readFileSync(png));
+    }
+    if (st.size > 60 * 1024 * 1024) return json(res, 413, { error: 'file too large to preview' });
+    const type = FILE_MIME[ext] ?? 'text/plain; charset=utf-8';
+    if (ext !== '.pdf') headers['content-security-policy'] = "sandbox; default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'";
+    res.writeHead(200, { ...headers, 'content-type': type });
+    res.end(readFileSync(real));
   }
 
   function serveStatic(res: ServerResponse, path: string) {

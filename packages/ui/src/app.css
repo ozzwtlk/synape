@@ -946,10 +946,10 @@ input[type='range'] {
 }
 .orb-halo {
   position: absolute;
-  inset: -55%;
+  inset: -35%;
   border-radius: 50%;
-  background: radial-gradient(circle, color-mix(in srgb, var(--c) 55%, transparent) 0%, color-mix(in srgb, var(--c) 18%, transparent) 32%, transparent 62%);
-  opacity: 0.35;
+  background: radial-gradient(circle, color-mix(in srgb, var(--c) 30%, transparent) 30%, color-mix(in srgb, var(--c) 8%, transparent) 50%, transparent 68%);
+  opacity: 0.3;
   pointer-events: none;
   transition: opacity 0.5s;
 }
@@ -966,8 +966,8 @@ input[type='range'] {
   }
 }
 .orb-node.k-plan .orb-halo {
-  inset: -70%;
-  opacity: 0.6;
+  inset: -45%;
+  opacity: 0.55;
 }
 .orb-node.faint .orb-halo {
   opacity: 0.12;
@@ -1129,4 +1129,291 @@ input[type='range'] {
   .orb-core {
     animation: none !important;
   }
+}
+
+/* ───────────── event-display detectors ───────────── */
+.det-glow {
+  filter: drop-shadow(0 0 2.5px currentColor) drop-shadow(0 0 7px currentColor);
+}
+.graph.animated .det-vertex.live {
+  transform-origin: center;
+  transform-box: fill-box;
+  animation: vertex 1.6s ease-in-out infinite;
+}
+@keyframes vertex {
+  50% {
+    transform: scale(1.5);
+  }
+}
+.graph.animated .det-sweep {
+  transform-origin: center;
+  transform-box: view-box;
+  animation: orbit 3.2s linear infinite;
+  mix-blend-mode: screen;
+}
+.det-track {
+  stroke-linecap: round;
+}
+.graph.animated .det-track.live {
+  stroke-dasharray: 60;
+  animation: draw 1.4s cubic-bezier(0.3, 0, 0.2, 1) infinite;
+  filter: drop-shadow(0 0 3px currentColor);
+}
+@keyframes draw {
+  from {
+    stroke-dashoffset: 60;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+.graph.animated .det-flow {
+  animation: flowseg 0.8s linear infinite;
+}
+@keyframes flowseg {
+  to {
+    stroke-dashoffset: -14;
+  }
+}
+.graph.animated .det-spin {
+  transform-origin: center;
+  transform-box: view-box;
+  animation: orbit 9s linear infinite;
+}
+.graph.animated .det-spin.slow {
+  animation-duration: 60s;
+}
+.det-count {
+  font: 600 9px/1 var(--font-mono);
+  letter-spacing: 0.06em;
+  opacity: 0.85;
+}
+.orb-node.k-plan .det-count {
+  font-size: 11px;
+}
+.tn-fig {
+  margin-left: 5px;
+  color: #f4f0ff;
+  font-weight: 600;
+}
+
+/* ───────────── science panels: summary, paper, outputs ───────────── */
+.chip.xs {
+  font-size: 9.5px;
+  padding: 1px 6px;
+}
+.modal.summary {
+  width: min(860px, 94vw);
+  max-height: 90vh;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.sum-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+  gap: 8px;
+}
+.sum-stat {
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  padding: 9px 10px;
+  background: rgba(14, 20, 40, 0.6);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.sum-stat b {
+  font: 600 18px/1 var(--font-display);
+}
+.sum-stat span {
+  font: 500 9.5px/1 var(--font-mono);
+  color: var(--text-3);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.sum-tldr {
+  border: 1px solid rgba(184, 166, 255, 0.3);
+  border-radius: var(--r-lg);
+  padding: 12px 16px;
+  background: radial-gradient(120% 120% at 0% 0%, rgba(184, 166, 255, 0.12), transparent 60%), rgba(12, 16, 34, 0.7);
+  font-size: 14px;
+  line-height: 1.55;
+}
+.sum-tldr .eyebrow {
+  color: var(--nucleus);
+  margin-bottom: 4px;
+}
+.sum-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  padding: 7px 2px;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 12.5px;
+}
+.sum-row:hover {
+  background: rgba(184, 166, 255, 0.06);
+}
+.sum-report {
+  max-height: 46vh;
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+.modal.paper {
+  width: 96vw;
+  height: 92vh;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.paper-grid {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1.5fr) minmax(320px, 1fr);
+  gap: 14px;
+}
+.paper-doc {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+}
+.paper-figs {
+  min-height: 0;
+  overflow: auto;
+  padding-right: 4px;
+}
+.prov {
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  padding: 8px;
+  margin-bottom: 10px;
+  background: rgba(10, 14, 30, 0.6);
+}
+.prov-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  background: none;
+  border: 0;
+  color: var(--text);
+  cursor: pointer;
+  padding: 2px 2px 8px;
+  text-align: left;
+  min-width: 0;
+}
+.prov-head:hover b {
+  color: var(--nucleus);
+}
+.fig-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 8px;
+}
+.fig {
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  cursor: zoom-in;
+  background: #0a0e1d;
+  transition: border-color 0.2s, transform 0.2s;
+}
+.fig:hover {
+  border-color: var(--nucleus);
+  transform: translateY(-1px);
+}
+.fig-img {
+  aspect-ratio: 4 / 3;
+  background: #f6f6f2;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+.fig-img img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.fig figcaption {
+  padding: 5px 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 10px;
+  min-width: 0;
+}
+.viewer {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 0;
+}
+.viewer-head {
+  gap: 8px;
+  font-size: 11px;
+}
+.viewer iframe.pdf {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+.viewer-img {
+  max-width: 100%;
+  max-height: 60vh;
+  object-fit: contain;
+  background: #f6f6f2;
+  border-radius: 8px;
+}
+.file-list {
+  display: flex;
+  flex-direction: column;
+}
+.file-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  background: none;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  color: var(--text-2);
+  padding: 5px 2px;
+  cursor: pointer;
+  font-size: 11px;
+  text-align: left;
+}
+.file-row:hover {
+  color: var(--text);
+  background: rgba(184, 166, 255, 0.05);
+}
+@media (max-width: 900px) {
+  .paper-grid {
+    grid-template-columns: 1fr;
+  }
+}
+.pdf-pages {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: center;
+  background: #1a1f30;
+  border-radius: 8px;
+  padding: 10px;
+}
+.pdf-pages img {
+  width: 100%;
+  max-width: 900px;
+  background: #fff;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
 }

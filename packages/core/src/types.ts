@@ -215,6 +215,10 @@ export interface Task extends TaskSpec {
   /** Escalation floor: minimum tier after failures. */
   minTier: number;
   excludedModels: string[];
+  /** Short answer-first bullets (synthesis tasks). */
+  resultTldr?: string;
+  /** Files produced, newest version per relative path. */
+  outputs?: OutputFile[];
   /** Computations by program; open tool calls tracked to close them on agent exit. */
   computes?: Record<string, ComputeStat>;
   computeOpen?: Record<string, { program: string; agentId: string }>;
@@ -232,6 +236,19 @@ export interface Task extends TaskSpec {
   endedAt?: number;
   /** Revision feedback for the next attempt. */
   feedback?: string;
+}
+
+/** A file an agent created or modified while working (figures are snapshotted). */
+export interface OutputFile {
+  /** Absolute path where the agent wrote it. */
+  path: string;
+  /** Path relative to the agent's working directory. */
+  rel: string;
+  size: number;
+  mtime: number;
+  agentId?: string;
+  /** Copy taken when the agent finished (figures/PDFs), so provenance survives later edits. */
+  snapshot?: string;
 }
 
 /** One program a task has run (Python, Wolfram, MadGraph…), aggregated over its agents. */
@@ -358,7 +375,7 @@ export interface Signal {
 }
 
 /** Bump when the reducer derives new state, so stale snapshots are re-folded. */
-export const STATE_SCHEMA = 2;
+export const STATE_SCHEMA = 3;
 
 export interface RunState {
   schema?: number;

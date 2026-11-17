@@ -146,7 +146,16 @@ export function applyEvent(s: RunState, e: EventEnvelope): RunState {
       const t = s.tasks[b.taskId];
       if (!t) break;
       t.resultSummary = b.summary;
+      if (b.tldr !== undefined) t.resultTldr = b.tldr;
       if (b.verified !== undefined) t.verified = b.verified;
+      break;
+    }
+    case 'task.outputs': {
+      const t = s.tasks[b.taskId];
+      if (!t) break;
+      const byRel = new Map((t.outputs ?? []).map((f) => [f.rel, f]));
+      for (const f of b.files) byRel.set(f.rel, { ...f, agentId: b.agentId });
+      t.outputs = [...byRel.values()].sort((x, y) => y.mtime - x.mtime).slice(0, 300);
       break;
     }
     case 'task.feedback': {

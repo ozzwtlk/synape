@@ -2,10 +2,21 @@
 
 <h1 align="center">synape</h1>
 
-<p align="center"><b>A visual, event-sourced orchestration engine for Claude Code and Codex agents.</b><br>
-Describe an objective; watch a hierarchy of agents plan, delegate, execute, cross-check and synthesize it in a live graph.</p>
+<p align="center"><b>A research orchestrator for Claude Code and Codex agents.</b><br>
+State a scientific objective. A hierarchy of agents plans it, runs the derivations, literature checks and computations, has every key result independently re-derived by a different model family, and traces each figure in your manuscript back to the agent that produced it.</p>
 
 ![A real hierarchical run: root orchestrator, two sub-orchestrator systems, workers and cross-family review satellites](docs/screenshots/hierarchy-orbit.png)
+
+## For research
+
+Synape was built for scientific work, where a result is only worth something once it has been checked, and you need to know where every number and plot came from.
+
+- **Cross-checked results.** Derivations and numerical results are recomputed by a different model family (Claude ↔ Codex) by an independent route. Disagreements are reported rather than averaged away, and every node shows whether its result is *verified*, *unverified* or *disputed*.
+- **Computations you can see.** Running Python, Wolfram/Mathematica, MadGraph, micrOMEGAs, Julia, ROOT, Pythia, Delphes, LaTeX, compilers or your own `./binary` shows up live as small satellites on the node that ran it. Each program has a stable colour derived from its name, and hovering shows the last command.
+- **Paper & figures.** A built-in PDF viewer for the manuscript, plus a provenance panel. It shows every figure the agents produced, grouped by the node that produced it (with model and verification status), and which figures `main.tex` actually `\includegraphics`, following `\input`/`\include`. Figures are snapshotted when an agent finishes, so later edits can't rewrite provenance.
+- **Outputs per node.** Each node's *Outputs* tab lists exactly the files it wrote. In git workspaces this is checked against git, so a fresh worktree checkout isn't mistaken for work.
+- **A short answer at the end.** The final synthesis leads with a TL;DR (the result with its uncertainty, what is verified, the biggest open issue). The *Summary* panel opens when a run finishes, with verification counts, failures, deliverables and per-workstream one-liners.
+- **Runs that survive usage limits.** When a subscription window is exhausted, the run pauses and resumes automatically at the reset time, without spending retries. Models your plan doesn't include can be switched off, and any node can be pinned to a specific model.
 
 ## What it does
 
@@ -65,8 +76,9 @@ Data lives in `~/.local/share/synape` (override with `SYNAPE_HOME`): `synape.db`
 
 | Area | What it shows |
 |---|---|
-| **Graph** (centre) | Tasks as cells. The soma colour shows the model family (ember = Claude, ion = Codex, violet = orchestration) and the membrane ring shows context used. Arrows are data dependencies, faint arcs are delegation, dashed satellites are reviews. Edges animate only while work flows along them, and particles mark real hand-offs. Switch between *Orbit* and *Flow*, collapse clusters, or use *Focus* to isolate a neighbourhood. |
-| **Inspector** | Objective, acceptance criteria, result, reviews, agent state, tokens, context, escalations, dependencies, the live terminal and tool calls, artifacts (reports, diffs, plans, verdicts), and the routing explanation with the full candidate table. Expand it into a wide workspace. |
+| **Graph** (centre) | Every node is drawn like a particle-detector event display, and every mark encodes real data. **Orchestrators** are progress dials: one outer segment per subtask, coloured by its state and flowing while it runs, with decay tracks to each child and energy deposits scaled by tokens. **Workers** show their tool activity over time as calorimeter towers (angle = time, height = activity, tint = program run), recent tool calls as tracks, an inner context-usage gauge, and a radar sweep while live. **Reviews** are reticles carrying the verdict. **Computations** are hexagonal crystals coloured by program. Colours: ember = Claude, ion = Codex, violet = orchestration, green ring = verified. Switch between *Orbit* and *Flow*, collapse clusters, or use *Focus*. |
+| **Summary / Paper** (top) | *★ Summary*: the TL;DR and verification status. *◫ Paper*: the manuscript PDF beside every produced figure and its provenance. |
+| **Inspector** | Objective, acceptance criteria, result, reviews, agent state, tokens, context, escalations, dependencies, a model picker (pin this node to a model), the live terminal and tool calls, **outputs** (figures and files the node wrote, with previews), artifacts (reports, diffs, plans, verdicts), and the routing explanation with the full candidate table. Expand it into a wide workspace. |
 | **Command** (right) | Talk to the orchestrator: follow-up instructions re-plan the live graph. Select an agent and tick *Ask … directly* to question it in its own resumed session (read-only). Approvals appear here. Task chips focus the graph. |
 | **HUD** (top) | Tokens, cache reads, agents and subscription windows. Click it for the full resource breakdown. Pause, resume and cancel live there too, along with *Git* (approval-gated publication) and *Fleet* (providers, catalog, learned performance). |
 | **Timeline** (bottom) | Scrub or replay the whole run from the persisted event log. |

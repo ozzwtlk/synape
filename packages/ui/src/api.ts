@@ -1,4 +1,14 @@
-import type { EventEnvelope, ModelProfile, QuotaWindow, RunState } from '@synape/core';
+import type { EventEnvelope, ModelProfile, OutputFile, QuotaWindow, RunState } from '@synape/core';
+
+export interface OutputsResponse {
+  recorded: Record<string, OutputFile[]>;
+  inferred: Record<string, OutputFile[]>;
+  pdfs: OutputFile[];
+  tex: { names: string[]; texFiles: string[]; mains: string[]; figures: { name: string; rel?: string; path?: string }[] };
+}
+
+/** URL of a run file (confined server-side); `thumb` renders a PDF's first page. */
+export const fileUrl = (runId: string, path: string, thumb = false) => `/api/runs/${runId}/file?path=${encodeURIComponent(path)}${thumb ? '&thumb=1' : ''}`;
 
 let token = '';
 export let home = '';
@@ -71,6 +81,7 @@ export const api = {
   approve: (id: string, approvalId: string, approved: boolean) => req(`/api/runs/${id}/approvals/${approvalId}`, { method: 'POST', json: { approved } }),
   git: (path: string) => req<RepoInfo>(`/api/git?path=${encodeURIComponent(path)}`),
   gitAction: (id: string, kind: string) => req(`/api/runs/${id}/git`, { method: 'POST', json: { kind } }),
+  outputs: (id: string) => req<OutputsResponse>(`/api/runs/${id}/outputs`),
   fs: (path?: string) => req<{ path: string; parent: string | null; entries: string[] }>(`/api/fs${path ? `?path=${encodeURIComponent(path)}` : ''}`),
 };
 

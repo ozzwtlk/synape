@@ -6,7 +6,7 @@ import { setLowPower, useStore, viewState } from '../store';
 import { fmtDuration, fmtTokens } from '../util';
 
 /** Top bar: run identity, controls and the live resource HUD. */
-export function TopBar({ providers, onGit, onFleet }: { providers?: ProvidersResponse; onGit: () => void; onFleet: () => void }) {
+export function TopBar({ providers, onGit, onFleet, onSummary, onPaper }: { providers?: ProvidersResponse; onGit: () => void; onFleet: () => void; onSummary: () => void; onPaper: () => void }) {
   const s = useStore(viewState);
   useStore((x) => x.version);
   const runId = useStore((x) => x.runId);
@@ -60,6 +60,12 @@ export function TopBar({ providers, onGit, onFleet }: { providers?: ProvidersRes
             Cancel
           </button>
         )}
+        <button className={`btn sm ${['completed', 'failed'].includes(st) ? 'primary' : 'ghost'}`} onClick={onSummary} title="Short end summary: the answer, what is verified, what failed">
+          ★ Summary
+        </button>
+        <button className="btn sm ghost" onClick={onPaper} title="Manuscript PDF and figure provenance">
+          ◫ Paper
+        </button>
         <button className="btn sm ghost" onClick={onGit} title="Git & publication">
           ⑂ Git
         </button>

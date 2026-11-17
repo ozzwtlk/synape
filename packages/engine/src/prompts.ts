@@ -226,11 +226,19 @@ ${p.reviews ? `Reviews: ${p.reviews}\n` : ''}Artifacts: ${p.artifactPaths.join('
 Rules: combine only what the results support. Keep verified and unverified findings clearly separated. Preserve disagreements between agents or reviewers instead of forcing consensus. Keep exact numbers, equations, units and citations. State plainly what remains unknown or undone.
 
 Format (markdown):
+## TL;DR
+3–5 bullet points, ≤80 words in total. Lead with the answer or main result (with its number and uncertainty where there is one), then what is verified, then the biggest open issue.
 ## Summary
 ≤200 words.
 ## Findings
 ## Verification status
 ## Open questions and next steps`;
+}
+
+export function extractTldr(report: string): string | undefined {
+  const m = report.match(/##\s*TL;?DR\s*\n([\s\S]*?)(?=\n##\s|$)/i);
+  const s = m?.[1].trim();
+  return s ? s.slice(0, 900) : undefined;
 }
 
 export function extractSummary(report: string): string {

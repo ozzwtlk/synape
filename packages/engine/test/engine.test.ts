@@ -389,3 +389,47 @@ describe('git workspaces', () => {
     expect(s.messages.some((m) => m.text.includes('Boundary audit'))).toBe(false);
   });
 });
+
+describe('research outputs', () => {
+  it('records files an agent produced, snapshots figures, and carries the TL;DR to the run', async () => {
+    const { mkdtempSync: mk, writeFileSync: wf, utimesSync } = await import('node:fs');
+    const ws = mk(join(tmpdir(), 'synape-ws-'));
+    wf(join(ws, 'old.txt'), 'pre-existing');
+    utimesSync(join(ws, 'old.txt'), new Date(Date.now() - 3600_000), new Date(Date.now() - 3600_000));
+    const { engine } = setup((spec) => {
+      if (isPlan(spec)) return { structured: { summary: 'p', reply: 'ok', tasks: [plannedTask('fig', { permission: 'write' })] } };
+      if (isSynth(spec)) return { text: '## TL;DR\n- m = 125.1 ± 0.2\n- verified\n## Summary\nlong form' };
+      wf(join(spec.cwd, 'plot.png'), 'PNG');
+      wf(join(spec.cwd, 'fit.py'), 'print(1)');
+      return { text: '## Summary\nmade a plot' };
+    });
+    await engine.init();
+    const runId = engine.createRun({ objective: 'make a figure', workspace: ws, config: { permissionCeiling: 'write' } });
+    const s = await waitFor(engine, runId, done);
+    expect(s.run.status).toBe('completed');
+    const t = Object.values(s.tasks).find((x) => x.title === 'Task fig')!;
+    const rels = (t.outputs ?? []).map((f) => f.rel);
+    expect(rels).toContain('plot.png');
+    expect(rels).toContain('fit.py');
+    expect(rels).not.toContain('old.txt');
+    expect(t.outputs!.find((f) => f.rel === 'plot.png')!.snapshot).toMatch(/outputs/);
+    expect(s.tasks[s.run.rootTaskId!].resultTldr).toMatch(/m = 125.1/);
+  });
+
+  it('resolves the figures a manuscript includes, following \\input from the main document', async () => {
+    const { mkdtempSync: mk, writeFileSync: wf, mkdirSync: md } = await import('node:fs');
+    const { texGraphics } = await import('../src/outputs.ts');
+    const ws = mk(join(tmpdir(), 'synape-tex-'));
+    md(join(ws, 'sections'));
+    md(join(ws, 'figures'));
+    md(join(ws, 'vendor/man'), { recursive: true });
+    wf(join(ws, 'main.tex'), '\\documentclass{article}\n\\begin{document}\n\\input{sections/res}\n% \\includegraphics{commented}\n\\end{document}');
+    wf(join(ws, 'sections/res.tex'), '\\includegraphics[width=\\linewidth]{figures/spectrum.pdf}\n\\includegraphics{missing_one}');
+    wf(join(ws, 'figures/spectrum.pdf'), '%PDF');
+    wf(join(ws, 'vendor/man/manual.tex'), '\\documentclass{book}\\includegraphics{vendor_fig}');
+    const tex = texGraphics(ws);
+    expect(tex.mains).toEqual(['main.tex']);
+    expect(tex.names.sort()).toEqual(['missing_one', 'spectrum']);
+    expect(tex.figures.find((f) => f.name === 'spectrum')?.rel).toBe('figures/spectrum.pdf');
+  });
+});

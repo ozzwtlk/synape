@@ -5,8 +5,9 @@ import { api, type ProvidersResponse } from '../api';
 import { select, useStore, viewState } from '../store';
 import { KIND_LABEL, STATUS_LABEL, familyOfProvider, fmtDuration, fmtTime, fmtTokens, isActive, latestAgent } from '../util';
 import { Diff, Markdown } from './Markdown';
+import { OutputsTab } from './Science';
 
-type Tab = 'overview' | 'activity' | 'artifacts' | 'routing';
+type Tab = 'overview' | 'activity' | 'outputs' | 'artifacts' | 'routing';
 
 export function Inspector({ providers, onExpand, expanded }: { providers?: ProvidersResponse; onExpand: () => void; expanded: boolean }) {
   const s = useStore(viewState);
@@ -61,7 +62,7 @@ export function Inspector({ providers, onExpand, expanded }: { providers?: Provi
           </div>
         )}
         <div className="tabs" role="tablist">
-          {(['overview', 'activity', 'artifacts', 'routing'] as Tab[]).map((t) => (
+          {(['overview', 'activity', 'outputs', 'artifacts', 'routing'] as Tab[]).map((t) => (
             <button key={t} className="tab" role="tab" aria-selected={tab === t} onClick={() => setTab(t)}>
               {t === 'artifacts' ? `artifacts ${task.artifactIds.length || ''}` : t}
             </button>
@@ -72,6 +73,7 @@ export function Inspector({ providers, onExpand, expanded }: { providers?: Provi
         {tab === 'overview' && <Overview s={s} t={task} agent={agent} runId={runId} providers={providers} />}
         {tab === 'activity' && agent && <Activity runId={runId} agent={agent} expanded={expanded} />}
         {tab === 'activity' && !agent && <p className="faint">No agent has run this task yet.</p>}
+        {tab === 'outputs' && <OutputsTab runId={runId} s={s} t={task} />}
         {tab === 'artifacts' && <Artifacts s={s} t={task} runId={runId} />}
         {tab === 'routing' && <Routing t={task} providers={providers} />}
       </div>
