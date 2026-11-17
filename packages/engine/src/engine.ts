@@ -605,16 +605,17 @@ export class Engine {
     }
     if (!info.isRepo || !info.root) return { cwd: ws };
     const sub = ws.slice(info.root.length); // workspace may be a subdir of the repo
-    if (permissionRank(perm) >= permissionRank('write')) {
-      const wt = await this.worktrees.forTask(info.root, runId, t.id);
-      return { cwd: join(wt.path, sub), branch: wt.branch };
-    }
+    // Reviewers must see exactly what the author produced: the author's worktree.
+    // (Checked first: a reviewer allowed to execute tests must not get a fresh worktree.)
     if (t.kind === 'review' && t.reviewOf) {
       const target = s.tasks[t.reviewOf];
       if (target && permissionRank(this.effectivePermission(s, target)) >= permissionRank('write')) {
         const wt = await this.worktrees.forTask(info.root, runId, target.id);
         return { cwd: join(wt.path, sub) };
       }
+    } else if (permissionRank(perm) >= permissionRank('write')) {
+      const wt = await this.worktrees.forTask(info.root, runId, t.id);
+      return { cwd: join(wt.path, sub), branch: wt.branch };
     }
     const integ = this.worktrees.integrationPath(runId);
     return { cwd: existsSync(integ) ? join(integ, sub) : ws };
@@ -739,6 +740,16 @@ export class Engine {
     await this.onAgentSuccess(runId, taskId, agentId, final.text, final.structured);
   }
 
+  /** Rewrite references to any of this run's worktrees to the original workspace path. */
+  neutralizePaths(runId: string, text: string): string {
+    const ws = this.state(runId).run.workspace;
+    const info = this.repoCache.get(ws);
+    if (!info?.isRepo || !info.root) return text;
+    const sub = ws.slice(info.root.length);
+    const base = join(this.dataDir, 'worktrees', runId).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return text.replace(new RegExp(`${base}/(?:task_[a-z0-9]+|_integration)${sub.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'g'), ws);
+  }
+
   private depContext(runId: string, t: Task) {
     const s = this.state(runId);
     return t.deps
@@ -747,7 +758,7 @@ export class Engine {
       .map((d) => ({
         id: d.id,
         title: d.title,
-        summary: d.resultSummary ?? '(no summary)',
+        summary: this.neutralizePaths(runId, d.resultSummary ?? '(no summary)'),
         verified: d.verified,
         artifactPaths: d.artifactIds.map((a) => s.artifacts[a]?.path).filter(Boolean) as string[],
       }));

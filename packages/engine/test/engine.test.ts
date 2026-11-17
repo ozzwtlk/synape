@@ -269,3 +269,42 @@ describe('engine', () => {
     expect(Object.values(s.tasks).filter((t) => t.kind === 'synthesize')).toHaveLength(2);
   });
 });
+
+import { execFileSync } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
+
+describe('git workspaces', () => {
+  it('runs writers in isolated worktrees, reviewers in the author worktree, and merges verified work', async () => {
+    const repo = mkdtempSync(join(tmpdir(), 'synape-repo-'));
+    const git = (...a: string[]) => execFileSync('git', a, { cwd: repo, encoding: 'utf8' });
+    git('init', '-q');
+    writeFileSync(join(repo, 'a.txt'), 'one\n');
+    git('add', '-A');
+    git('-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-qm', 'init');
+    const cwds: Record<string, string> = {};
+    const { engine } = setup((spec) => {
+      if (isPlan(spec)) return { structured: { summary: 'p', reply: 'ok', tasks: [plannedTask('w', { permission: 'execute', verification: 'review' })] } };
+      if (isReview(spec)) {
+        cwds.review = spec.cwd;
+        return { structured: { verdict: 'pass', confidence: 0.9, summary: 'ok', issues: [] } };
+      }
+      if (isSynth(spec)) return { text: '## Summary\ns' };
+      cwds.author = spec.cwd;
+      writeFileSync(join(spec.cwd, 'b.txt'), 'two\n');
+      return { text: `## Summary\nwrote b.txt in ${spec.cwd}` };
+    });
+    await engine.init();
+    const runId = engine.createRun({ objective: 'git test', workspace: repo, config: { permissionCeiling: 'execute' } });
+    const s = await waitFor(engine, runId, done, 20000);
+    expect(s.run.status).toBe('completed');
+    expect(cwds.author).not.toBe(repo);
+    expect(cwds.review).toBe(cwds.author);
+    // user's checkout untouched; verified work merged into the run branch
+    expect(git('status', '--porcelain')).toBe('');
+    expect(git('show', `synape/${runId.slice(0, 8)}:b.txt`)).toBe('two\n');
+    // downstream agents see neutral paths, not another task's worktree
+    expect(engine.neutralizePaths(runId, `see ${cwds.author}/b.txt`)).toBe(`see ${repo}/b.txt`);
+    // no boundary violations reported
+    expect(s.messages.some((m) => m.text.includes('Boundary audit'))).toBe(false);
+  });
+});
