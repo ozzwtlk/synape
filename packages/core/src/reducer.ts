@@ -82,6 +82,7 @@ export function applyEvent(s: RunState, e: EventEnvelope): RunState {
     case 'run.status':
       s.run.status = b.status;
       s.run.statusReason = b.reason;
+      s.run.resumeAt = b.resumeAt;
       if (['completed', 'failed', 'cancelled'].includes(b.status)) s.run.endedAt = e.ts;
       else s.run.endedAt = undefined;
       break;
@@ -149,6 +150,18 @@ export function applyEvent(s: RunState, e: EventEnvelope): RunState {
     case 'task.feedback': {
       const t = s.tasks[b.taskId];
       if (t) t.feedback = b.feedback;
+      break;
+    }
+    case 'task.reopened': {
+      // Fresh start after a failure that wasn't the task's fault (usage limit, user resume).
+      const t = s.tasks[b.taskId];
+      if (!t) break;
+      t.status = b.status;
+      t.statusReason = b.reason;
+      t.endedAt = undefined;
+      t.attemptFloor = t.agentIds.length;
+      t.excludedModels = [];
+      t.feedback = undefined;
       break;
     }
     case 'task.escalated': {

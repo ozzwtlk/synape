@@ -1,7 +1,7 @@
 import { writeFileSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { permissionRank, type Usage } from '@synape/core';
-import { clip, type AdapterEvent, type AgentRunSpec, type ProviderAdapter, type ProviderInfo } from './types.ts';
+import { clip, isUsageLimit, type AdapterEvent, type AgentRunSpec, type ProviderAdapter, type ProviderInfo } from './types.ts';
 import { execText, runProcess } from './proc.ts';
 
 /**
@@ -162,7 +162,7 @@ export class CodexAdapter implements ProviderAdapter {
           text: finalText,
           structured,
           error: err,
-          errorClass: ok ? undefined : /rate|limit|auth|login|usage|quota|401|429/i.test(String(err)) || !completed ? 'provider' : 'task',
+          errorClass: ok ? undefined : isUsageLimit(String(err)) ? 'quota' : /rate|limit|auth|login|usage|quota|401|429/i.test(String(err)) || !completed ? 'provider' : 'task',
         };
       }
     }

@@ -25,7 +25,7 @@ import {
   type TaskSpec,
 } from '@synape/core';
 import type { EventStore } from './store.ts';
-import type { AdapterEvent, ProviderAdapter, ProviderInfo } from './adapters/types.ts';
+import { retryAfterMs, type AdapterEvent, type ErrorClass, type ProviderAdapter, type ProviderInfo } from './adapters/types.ts';
 import {
   PLAN_SCHEMA,
   REPLAN_SCHEMA,
@@ -63,6 +63,9 @@ interface RunningAgent {
   abort: AbortController;
 }
 
+/** Agents that count toward a task's retry budget: since the last reopen, excluding interruptions. */
+const countedAttempts = (s: RunState, t: Task) => t.agentIds.slice(t.attemptFloor ?? 0).filter((x) => s.agents[x]?.status !== 'interrupted').length;
+
 const id = (p: string) => `${p}_${randomUUID().replace(/-/g, '').slice(0, 10)}`;
 
 export class Engine {
@@ -73,6 +76,7 @@ export class Engine {
   models: ModelProfile[] = [];
   private running = new Map<string, RunningAgent>();
   private tickQueued = new Set<string>();
+  private resumeTimers = new Map<string, NodeJS.Timeout>();
   private worktrees: Worktrees;
   private repoCache = new Map<string, Awaited<ReturnType<typeof repoInfo>>>();
   private shuttingDown = false;
@@ -123,6 +127,7 @@ export class Engine {
       }
       this.emit(r.id, { type: 'recovery', detail: `Recovered run after restart; ${recovered.length} task(s) re-queued`, taskIds: recovered });
       if (r.status !== 'paused') this.scheduleTick(r.id);
+      else if (s.run.resumeAt) this.armAutoResume(r.id, s.run.resumeAt);
     }
   }
 
@@ -136,6 +141,8 @@ export class Engine {
 
   async shutdown() {
     this.shuttingDown = true;
+    for (const t of this.resumeTimers.values()) clearTimeout(t);
+    this.resumeTimers.clear();
     for (const r of this.running.values()) r.abort.abort();
     const deadline = Date.now() + 8000;
     while (this.running.size && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
@@ -210,15 +217,52 @@ export class Engine {
   }
 
   pause(runId: string) {
+    this.clearAutoResume(runId);
     this.emit(runId, { type: 'run.status', status: 'paused', reason: 'paused by user; running agents finish, no new agents start' });
   }
 
-  resume(runId: string) {
+  resume(runId: string, reason = 'resumed by user') {
     const s = this.state(runId);
-    if (s.run.status === 'paused' || s.run.status === 'failed') {
-      this.emit(runId, { type: 'run.status', status: 'running', reason: 'resumed by user' });
-      this.scheduleTick(runId);
+    if (s.run.status !== 'paused' && s.run.status !== 'failed') return;
+    this.clearAutoResume(runId);
+    if (s.run.status === 'failed') this.reopenFailed(runId);
+    this.emit(runId, { type: 'run.status', status: 'running', reason });
+    this.scheduleTick(runId);
+  }
+
+  /**
+   * Resuming a failed run: give failed tasks a fresh retry budget. Tasks that
+   * had delegated go back to waiting on their children; everything else re-queues.
+   */
+  private reopenFailed(runId: string) {
+    const s = this.state(runId);
+    const reopened: string[] = [];
+    for (const t of Object.values(s.tasks)) {
+      if (t.status !== 'failed') continue;
+      // A review whose target already settled (e.g. completed unverified) stays as is.
+      if (t.kind === 'review' && t.reviewOf && s.tasks[t.reviewOf]?.status !== 'awaiting_review' && s.tasks[t.reviewOf]?.status !== 'failed') continue;
+      const delegated = Object.values(s.tasks).some((k) => k.parentTaskId === t.id);
+      this.emit(runId, { type: 'task.reopened', taskId: t.id, status: delegated ? 'delegated' : 'pending', reason: 'reopened: run resumed after failure' });
+      reopened.push(t.id);
     }
+    this.emit(runId, { type: 'recovery', detail: `Run resumed; ${reopened.length} failed task(s) reopened with a fresh retry budget`, taskIds: reopened });
+  }
+
+  private armAutoResume(runId: string, at: number) {
+    this.clearAutoResume(runId);
+    // Timers can't exceed ~24.8 days; usage windows are far shorter.
+    const t = setTimeout(() => {
+      this.resumeTimers.delete(runId);
+      if (this.state(runId).run.status === 'paused') this.resume(runId, 'usage limit reset: auto-resumed');
+    }, Math.min(Math.max(0, at - Date.now()), 2 ** 31 - 1));
+    t.unref?.();
+    this.resumeTimers.set(runId, t);
+  }
+
+  private clearAutoResume(runId: string) {
+    const t = this.resumeTimers.get(runId);
+    if (t) clearTimeout(t);
+    this.resumeTimers.delete(runId);
   }
 
   cancelRun(runId: string) {
@@ -455,13 +499,13 @@ export class Engine {
       .sort((a, b) => (a.kind === 'review' ? -1 : 0) - (b.kind === 'review' ? -1 : 0) || a.depth - b.depth || a.createdAt - b.createdAt);
     for (const t of ready) {
       if (activeAgents(s).length >= lim.maxConcurrentAgents) break;
-      const totalAgents = Object.keys(s.agents).length;
+      const totalAgents = Object.values(s.agents).filter((a) => a.status !== 'interrupted').length;
       if (totalAgents >= lim.maxTotalAgents) {
         this.emit(runId, { type: 'limit.hit', limit: 'maxTotalAgents', detail: `${totalAgents} agents spawned (max ${lim.maxTotalAgents})`, taskId: t.id }, { dedupeKey: `maxTotal:${t.id}` });
         this.emit(runId, { type: 'task.status', taskId: t.id, status: 'failed', reason: 'agent spawn limit reached' });
         continue;
       }
-      const perTask = t.agentIds.length + Object.values(s.tasks).filter((x) => x.reviewOf === t.id).length;
+      const perTask = countedAttempts(s, t) + Object.values(s.tasks).filter((x) => x.reviewOf === t.id).length;
       if (perTask >= lim.maxAgentsPerTask) {
         this.emit(runId, { type: 'limit.hit', limit: 'maxAgentsPerTask', detail: `"${t.title}" used ${perTask} agents`, taskId: t.id });
         this.emit(runId, { type: 'task.status', taskId: t.id, status: 'failed', reason: 'per-task agent limit reached' });
@@ -517,7 +561,7 @@ export class Engine {
     const saturated = new Set<string>();
     for (const [p, cap] of Object.entries(s.run.config.limits.providerConcurrency)) if ([...this.running.values()].filter((r) => r.provider === p).length >= cap) saturated.add(p);
     const quotaUtilization: Record<string, number> = {};
-    for (const q of Object.values(s.quotas)) if (q.utilization !== undefined) quotaUtilization[q.provider] = Math.max(quotaUtilization[q.provider] ?? 0, q.utilization);
+    for (const q of Object.values(s.quotas)) if (q.utilization !== undefined && !(q.resetsAt && q.resetsAt < Date.now())) quotaUtilization[q.provider] = Math.max(quotaUtilization[q.provider] ?? 0, q.utilization);
     let authorModelId: string | undefined;
     if (t.kind === 'review' && t.reviewOf) {
       const target = s.tasks[t.reviewOf];
@@ -732,6 +776,11 @@ export class Engine {
         this.emit(runId, { type: 'agent.status', agentId, status: 'cancelled', reason: 'task cancelled' });
         return;
       }
+      if (final.errorClass === 'quota') {
+        // Not a failed attempt: the session can be resumed once the limit resets.
+        this.emit(runId, { type: 'agent.status', agentId, status: 'interrupted', reason: final.error });
+        return this.onUsageLimit(runId, taskId, agentId, final.error ?? 'usage limit reached');
+      }
       this.emit(runId, { type: 'agent.status', agentId, status: 'failed', reason: final.error });
       this.emit(runId, { type: 'error', message: final.error ?? 'agent failed', agentId, taskId, recoverable: true });
       this.onAgentFailure(runId, taskId, agentId, final.error ?? 'failed', final.errorClass ?? 'task');
@@ -838,7 +887,34 @@ export class Engine {
     });
   }
 
-  private onAgentFailure(runId: string, taskId: string, agentId: string, error: string, cls: 'provider' | 'task' | 'timeout' | 'cancelled' | 'infra') {
+  /**
+   * A provider's usage limit is exhausted. Re-queue the task without spending a
+   * retry, pause the run (running agents finish) and auto-resume at the reset.
+   */
+  private onUsageLimit(runId: string, taskId: string, agentId: string, error: string) {
+    const s = this.state(runId);
+    const t = s.tasks[taskId];
+    const a = s.agents[agentId];
+    if (t && !isTerminal(t)) this.emit(runId, { type: 'task.status', taskId, status: 'ready', reason: `waiting for ${a?.provider ?? 'provider'} usage limit to reset` });
+    const resets = Object.values(s.quotas)
+      .filter((q) => q.provider === a?.provider && q.status === 'rejected' && q.resetsAt && q.resetsAt > Date.now())
+      .map((q) => q.resetsAt!);
+    const hinted = retryAfterMs(error);
+    // Unknown reset time: probe again in 30 minutes (a still-limited agent fails fast and re-pauses).
+    const resumeAt = (resets.length ? Math.max(...resets) : hinted ? Date.now() + hinted : Date.now() + 30 * 60_000) + 60_000;
+    if (s.run.status === 'running' || s.run.status === 'planning') {
+      const when = new Date(resumeAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      this.emit(runId, { type: 'chat.message', messageId: id('msg'), from: 'system', text: `${a?.provider ?? 'Provider'} usage limit reached (${error.slice(0, 160)}). Run paused; it will auto-resume at ${when}, or press Resume to try sooner.` });
+      this.emit(runId, { type: 'run.status', status: 'paused', reason: `${a?.provider ?? 'provider'} usage limit; auto-resume at ${when}`, resumeAt });
+      this.armAutoResume(runId, resumeAt);
+    } else if (s.run.status === 'paused' && s.run.resumeAt && resumeAt > s.run.resumeAt) {
+      // Already paused for another provider's limit: wait for the later reset.
+      this.emit(runId, { type: 'run.status', status: 'paused', reason: `${s.run.statusReason ?? 'usage limit'}; extended to ${new Date(resumeAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`, resumeAt });
+      this.armAutoResume(runId, resumeAt);
+    }
+  }
+
+  private onAgentFailure(runId: string, taskId: string, agentId: string, error: string, cls: ErrorClass | 'infra') {
     const s = this.state(runId);
     const t = s.tasks[taskId];
     const a = s.agents[agentId];
@@ -851,13 +927,13 @@ export class Engine {
       this.emit(runId, { type: 'task.escalated', taskId, fromModel: a.modelId, minTier: t.minTier, excludeModel: a.modelId, reason: `provider error: ${error.slice(0, 200)}` });
     } else {
       this.recordPerf(runId, taskId, agentId, false, null, cls === 'timeout' ? 'timeout' : error.slice(0, 200));
-      const failures = t.agentIds.filter((x) => s.agents[x]?.status === 'failed').length;
+      const failures = t.agentIds.slice(t.attemptFloor ?? 0).filter((x) => s.agents[x]?.status === 'failed').length;
       if (failures >= 2 || cls === 'timeout') {
         const tier = this.models.find((m) => m.id === a.modelId)?.tier ?? 1;
         this.emit(runId, { type: 'task.escalated', taskId, fromModel: a.modelId, minTier: Math.min(4, tier + 1), excludeModel: a.modelId, reason: `${failures} failed attempt(s): ${error.slice(0, 160)}` });
       }
     }
-    const attempts = t.agentIds.filter((x) => s.agents[x]?.status !== 'interrupted').length;
+    const attempts = countedAttempts(s, t);
     if (attempts <= lim.maxRetries) {
       this.emit(runId, { type: 'task.feedback', taskId, feedback: `Previous attempt failed: ${error.slice(0, 800)}` });
       this.emit(runId, { type: 'task.status', taskId, status: 'ready', reason: `retrying after failure (${attempts}/${lim.maxRetries + 1})` });
@@ -1063,7 +1139,7 @@ export class Engine {
     }
     this.recordPerf(runId, target.id, authorAgentId, false, false, `review ${v.verdict}`);
     const lim = s.run.config.limits;
-    const attempts = target.agentIds.filter((a) => s.agents[a]?.status !== 'interrupted').length;
+    const attempts = countedAttempts(s, target);
     const issues = (v.issues ?? []).map((i) => `- [${i.severity}] ${i.description}`).join('\n');
     if (attempts <= lim.maxRetries) {
       const author = s.agents[authorAgentId];

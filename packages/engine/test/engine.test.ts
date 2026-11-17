@@ -187,6 +187,48 @@ describe('engine', () => {
     expect((engine.store.perfTable() as any[]).filter((r) => r.modelId === 'a:light' && r.successes < r.n)).toHaveLength(0);
   });
 
+  it('usage limits pause the run without spending retries, then resume cleanly', async () => {
+    let limited = true;
+    const { engine } = setup((spec) => {
+      if (isPlan(spec)) return { structured: { summary: 'p', reply: 'ok', tasks: [plannedTask('q')] } };
+      if (isSynth(spec)) return { text: '## Summary\ns' };
+      if (limited) return { ok: false, error: "You've hit your usage limit. Try again in 2 hours.", errorClass: 'quota' };
+      return { text: '## Summary\nok' };
+    });
+    await engine.init();
+    const runId = engine.createRun({ objective: 'quota', workspace: process.cwd() });
+    let s = await waitFor(engine, runId, (x) => x.run.status === 'paused');
+    const q = Object.values(s.tasks).find((t) => t.title === 'Task q')!;
+    expect(q.status).toBe('ready');
+    expect(q.excludedModels).toEqual([]);
+    expect(s.run.resumeAt! - Date.now()).toBeGreaterThan(110 * 60_000);
+    expect(Object.values(s.agents).filter((a) => a.taskId === q.id).every((a) => a.status === 'interrupted')).toBe(true);
+    limited = false;
+    engine.resume(runId);
+    s = await waitFor(engine, runId, done);
+    expect(s.run.status).toBe('completed');
+    expect(s.run.resumeAt).toBeUndefined();
+    await engine.shutdown();
+  });
+
+  it('resuming a failed run reopens failed tasks with a fresh retry budget', async () => {
+    let broken = true;
+    const { engine } = setup((spec) => {
+      if (isPlan(spec)) return { structured: { summary: 'p', reply: 'ok', tasks: [plannedTask('f'), plannedTask('g', { deps: ['f'] })] } };
+      if (broken) return { ok: false, error: 'boom', errorClass: 'task' };
+      if (isSynth(spec)) return { text: '## Summary\ns' };
+      return { text: '## Summary\nok' };
+    });
+    await engine.init();
+    const runId = engine.createRun({ objective: 'reopen', workspace: process.cwd() });
+    let s = await waitFor(engine, runId, done);
+    expect(s.run.status).toBe('failed');
+    broken = false;
+    engine.resume(runId);
+    s = await waitFor(engine, runId, (x) => x.run.status === 'completed');
+    expect(Object.values(s.tasks).every((t) => t.status === 'completed')).toBe(true);
+  });
+
   it('cancellation propagates to descendants and running agents', async () => {
     const { engine } = setup((spec) => {
       if (isPlan(spec)) return { structured: { summary: 'p', reply: 'ok', tasks: [plannedTask('slow'), plannedTask('after', { deps: ['slow'] })] } };

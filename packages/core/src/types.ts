@@ -211,6 +211,8 @@ export interface Task extends TaskSpec {
   /** Escalation floor: minimum tier after failures. */
   minTier: number;
   excludedModels: string[];
+  /** Agents before this index don't count toward retry limits (task was reopened). */
+  attemptFloor?: number;
   resultSummary?: string;
   artifactIds: string[];
   reviewIds: string[];
@@ -319,6 +321,8 @@ export interface RunInfo {
   config: RunConfig;
   status: RunStatus;
   statusReason?: string;
+  /** Paused for a provider usage limit: auto-resume at this time (ms). */
+  resumeAt?: number;
   createdAt: number;
   endedAt?: number;
   rootTaskId?: string;

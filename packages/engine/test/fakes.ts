@@ -1,7 +1,7 @@
 // TEST-ONLY scripted provider. Never registered by the application.
 import type { AdapterEvent, AgentRunSpec, ProviderAdapter, ProviderInfo } from '../src/adapters/types.ts';
 
-export type Script = (spec: AgentRunSpec, n: number) => { text?: string; structured?: unknown; ok?: boolean; error?: string; errorClass?: 'provider' | 'task'; delayMs?: number; tokens?: number };
+export type Script = (spec: AgentRunSpec, n: number) => { text?: string; structured?: unknown; ok?: boolean; error?: string; errorClass?: 'quota' | 'provider' | 'task'; delayMs?: number; tokens?: number };
 
 export class ScriptedAdapter implements ProviderAdapter {
   calls: AgentRunSpec[] = [];

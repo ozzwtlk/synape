@@ -1,5 +1,5 @@
 import { permissionRank, type Usage } from '@synape/core';
-import { clip, type AdapterEvent, type AgentRunSpec, type ProviderAdapter, type ProviderInfo } from './types.ts';
+import { clip, isUsageLimit, type AdapterEvent, type AgentRunSpec, type ProviderAdapter, type ProviderInfo } from './types.ts';
 import { execText, runProcess } from './proc.ts';
 
 /**
@@ -161,7 +161,7 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
             text: d.structured_output ? lastText || text : text,
             structured: d.structured_output,
             error: err,
-            errorClass: ok ? undefined : d.api_error_status || /rate|limit|auth|login|overloaded/i.test(String(err)) ? 'provider' : 'task',
+            errorClass: ok ? undefined : isUsageLimit(String(err)) ? 'quota' : d.api_error_status || /rate|limit|auth|login|overloaded/i.test(String(err)) ? 'provider' : 'task',
           };
         }
       } else if (l.stream === 'exit') {

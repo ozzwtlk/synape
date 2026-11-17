@@ -20,7 +20,7 @@ import type {
  */
 export type EventBody =
   | { type: 'run.created'; runId: string; title: string; objective: string; workspace: string; config: RunConfig }
-  | { type: 'run.status'; status: RunStatus; reason?: string }
+  | { type: 'run.status'; status: RunStatus; reason?: string; resumeAt?: number }
   | { type: 'run.config'; config: RunConfig }
   | { type: 'chat.message'; messageId: string; from: 'user' | 'orchestrator' | 'system' | 'agent'; agentId?: string; text: string; refs?: string[] }
   | ({ type: 'task.created'; taskId: string; parentTaskId?: string; createdBy?: string; depth: number; deps: string[]; reviewOf?: string } & TaskSpec)
@@ -29,6 +29,7 @@ export type EventBody =
   | { type: 'task.routed'; taskId: string; decision: RoutingDecision }
   | { type: 'task.result'; taskId: string; summary: string; verified?: boolean }
   | { type: 'task.feedback'; taskId: string; feedback: string }
+  | { type: 'task.reopened'; taskId: string; status: TaskStatus; reason: string }
   | { type: 'task.escalated'; taskId: string; fromModel: string; minTier: number; excludeModel?: string; reason: string }
   | { type: 'agent.spawned'; agentId: string; taskId: string; parentAgentId?: string; role: AgentRole; provider: ProviderId; model: string; modelId: string; effort?: string; depth: number; attempt: number }
   | { type: 'agent.status'; agentId: string; status: AgentStatus; reason?: string; pid?: number }

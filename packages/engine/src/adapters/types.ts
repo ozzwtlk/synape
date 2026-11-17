@@ -31,7 +31,7 @@ export type AdapterEvent =
   /** Cumulative usage for this agent run so far. */
   | { kind: 'usage'; usage: Usage }
   | { kind: 'quota'; window: string; utilization?: number; resetsAt?: number; status?: string }
-  | { kind: 'final'; ok: boolean; text: string; structured?: unknown; error?: string; errorClass?: 'provider' | 'task' | 'timeout' | 'cancelled' };
+  | { kind: 'final'; ok: boolean; text: string; structured?: unknown; error?: string; errorClass?: ErrorClass };
 
 export interface ProviderInfo {
   id: string;
@@ -50,3 +50,20 @@ export interface ProviderAdapter {
 }
 
 export const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}… [${s.length - n} more chars]` : s);
+
+/** quota = subscription/usage limit: wait for the reset, it's nobody's fault. */
+export type ErrorClass = 'quota' | 'provider' | 'task' | 'timeout' | 'cancelled';
+
+export const isUsageLimit = (msg: string) => /hit your .{0,30}limit|usage limit|rate[ _-]?limit|quota|too many requests|\b429\b/i.test(msg);
+
+/** Best-effort "try again in 2 hours 5 minutes" → ms from now. */
+export function retryAfterMs(msg: string): number | undefined {
+  const m = msg.match(/(?:try again|retry|resets?)\s+in\s+((?:\d+\s*(?:days?|d|hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b[\s,and]*)+)/i);
+  if (!m) return undefined;
+  let ms = 0;
+  for (const [, n, u] of m[1].matchAll(/(\d+)\s*([a-z]+)/gi)) {
+    const k = u[0].toLowerCase();
+    ms += Number(n) * (k === 'd' ? 864e5 : k === 'h' ? 36e5 : k === 'm' ? 6e4 : 1e3);
+  }
+  return ms || undefined;
+}
