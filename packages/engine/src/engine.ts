@@ -579,12 +579,12 @@ export class Engine {
     }
 
     // 4. Budgets.
-    // Local-model tokens cost no subscription quota: they don't count against the budget.
-    const used = billableTokens(s.totals) - (s.usageByProvider.local ? billableTokens(s.usageByProvider.local) : 0);
+    const used = this.missionTokens(s);
+    const ch = run.chapter ?? 0;
     if (run.config.budgets.maxTokens && used > run.config.budgets.maxTokens) {
-      this.emit(runId, { type: 'limit.hit', limit: 'budget.maxTokens', detail: `${used} tokens used of ${run.config.budgets.maxTokens}` });
+      this.emit(runId, { type: 'limit.hit', limit: 'budget.maxTokens', detail: `${used} tokens used of ${run.config.budgets.maxTokens} this mission` });
       this.emit(runId, { type: 'run.status', status: 'paused', reason: 'token budget exhausted' });
-      this.emit(runId, { type: 'approval.requested', id: id('appr'), kind: 'budget', description: `Token budget exhausted (${used.toLocaleString()} / ${run.config.budgets.maxTokens.toLocaleString()}). Approve to raise it by 50% and continue.` }, { dedupeKey: `budget:${run.config.budgets.maxTokens}` });
+      this.emit(runId, { type: 'approval.requested', id: id('appr'), kind: 'budget', description: `Token budget exhausted (${used.toLocaleString()} / ${run.config.budgets.maxTokens.toLocaleString()} this mission). Approve to raise it by 50% and continue.` }, { dedupeKey: `budget:${ch}:${run.config.budgets.maxTokens}` });
       return;
     }
     const api = s.usageByProvider;
@@ -604,9 +604,9 @@ export class Engine {
       const totalAgents = Object.values(s.agents).filter((a) => a.status !== 'interrupted' && !s.tasks[a.taskId]?.archived).length;
       if (totalAgents >= lim.maxTotalAgents) {
         // Like the token budget: pause and ask, rather than failing work that is ready to run.
-        this.emit(runId, { type: 'limit.hit', limit: 'maxTotalAgents', detail: `${totalAgents} agents spawned (max ${lim.maxTotalAgents})`, taskId: t.id }, { dedupeKey: `maxTotal:${lim.maxTotalAgents}` });
+        this.emit(runId, { type: 'limit.hit', limit: 'maxTotalAgents', detail: `${totalAgents} agents spawned (max ${lim.maxTotalAgents})`, taskId: t.id }, { dedupeKey: `maxTotal:${run.chapter ?? 0}:${lim.maxTotalAgents}` });
         this.emit(runId, { type: 'run.status', status: 'paused', reason: `agent limit reached (${lim.maxTotalAgents})` });
-        this.emit(runId, { type: 'approval.requested', id: id('appr'), kind: 'budget', description: `Agent limit reached (${totalAgents} / ${lim.maxTotalAgents} agents this mission). Approve to raise it and continue.`, payload: { limit: 'maxTotalAgents' } }, { dedupeKey: `agents:${lim.maxTotalAgents}` });
+        this.emit(runId, { type: 'approval.requested', id: id('appr'), kind: 'budget', description: `Agent limit reached (${totalAgents} / ${lim.maxTotalAgents} agents this mission). Approve to raise it and continue.`, payload: { limit: 'maxTotalAgents' } }, { dedupeKey: `agents:${run.chapter ?? 0}:${lim.maxTotalAgents}` });
         return;
       }
       const perTask = countedAttempts(s, t) + Object.values(s.tasks).filter((x) => x.reviewOf === t.id).length;
@@ -694,6 +694,23 @@ export class Engine {
       qualityBias: s.run.config.qualityBias,
       authorModelId,
     });
+  }
+
+  /**
+   * Billable tokens of the current mission, for the run budget. Finished
+   * missions are archived and stop counting, so a follow-up starts from zero.
+   * Local-model tokens cost no subscription quota and never count.
+   */
+  private missionTokens(s: RunState): number {
+    let n = 0;
+    for (const a of Object.values(s.agents)) {
+      if (a.provider === 'local') continue;
+      const t = s.tasks[a.taskId];
+      // The root orchestrator only plans the first mission; follow-ups are separate replan tasks.
+      if (t?.archived || (s.run.memory && t?.id === s.run.rootTaskId)) continue;
+      n += billableTokens(a.usage);
+    }
+    return n;
   }
 
   /** Providers this run may route to. */

@@ -388,6 +388,18 @@ describe('engine', () => {
     expect(s.run.memory).toMatch(/Mission 2: now do the extra thing/);
     expect(Object.values(s.tasks).filter((t) => !t.archived).map((t) => t.id)).toEqual([s.run.rootTaskId]);
   });
+
+  it('the token budget counts the current mission only', async () => {
+    const { engine } = setup((spec) => (isPlan(spec) ? { structured: { summary: 'p', reply: 'ok', tasks: [plannedTask('one')] } } : spec.jsonSchema && 'cancel' in (spec.jsonSchema as any).properties ? { structured: { reply: 'ok', add: [plannedTask('two')], cancel: [] } } : isSynth(spec) ? { text: '## Summary\ns' } : { text: '## Summary\nok', tokens: 400 }));
+    await engine.init();
+    // Mission 1 uses most of the budget; mission 2 must not inherit that.
+    const runId = engine.createRun({ objective: 'o', workspace: process.cwd(), config: { budgets: { maxTokens: 3000 } } });
+    await waitFor(engine, runId, (s) => s.run.chapter === 1);
+    engine.postMessage(runId, 'now something unrelated');
+    const s = await waitFor(engine, runId, (s) => s.run.chapter === 2 || s.run.status === 'paused');
+    expect(s.run.status).toBe('completed');
+    expect(Object.values(s.approvals)).toHaveLength(0);
+  });
 });
 
 describe('agent limit', () => {
