@@ -20,8 +20,8 @@ export const fmtDuration = (ms?: number) => {
 
 export const fmtTime = (ts: number) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
-export type Family = 'anthropic' | 'openai' | 'other';
-export const familyOfProvider = (p?: string): Family => (p === 'claude-code' ? 'anthropic' : p === 'codex' ? 'openai' : 'other');
+export type Family = 'anthropic' | 'openai' | 'local' | 'other';
+export const familyOfProvider = (p?: string): Family => (p === 'claude-code' ? 'anthropic' : p === 'codex' ? 'openai' : p === 'local' ? 'local' : 'other');
 
 export const latestAgent = (s: RunState, t: Task): Agent | undefined => {
   for (let i = t.agentIds.length - 1; i >= 0; i--) {

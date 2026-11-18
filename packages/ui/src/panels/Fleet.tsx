@@ -62,7 +62,7 @@ export function Fleet({ providers, onClose, onRefresh }: { providers?: Providers
                     }}
                   />
                 </td>
-                <td className={m.provider === 'codex' ? 'fam-text-openai' : 'fam-text-anthropic'}>{m.label}</td>
+                <td className={`fam-text-${m.provider === 'codex' ? 'openai' : m.provider === 'local' ? 'local' : 'anthropic'}`}>{m.label}</td>
                 <td className="mono">{m.tier}</td>
                 <td className="mono">{m.ruPer1kTokens}</td>
                 <td className="mono">{fmtTokens(m.contextWindow)}</td>

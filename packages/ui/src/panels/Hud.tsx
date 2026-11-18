@@ -163,7 +163,7 @@ function ResourcePanel({ s, onClose }: { s: RunState; onClose: () => void }) {
       </div>
       {providers.map(([p, u]) => (
         <div key={p} className="row prov-row">
-          <span className={`chip ${p === 'claude-code' ? 'ember' : p === 'codex' ? 'ion' : ''}`}>{p}</span>
+          <span className={`chip ${p === 'claude-code' ? 'ember' : p === 'codex' ? 'ion' : p === 'local' ? 'leaf' : ''}`}>{p}</span>
           <span className="mono">{fmtTokens(billableTokens(u))}</span>
           <span className="mono faint">+{fmtTokens(u.cacheReadTokens)} cached</span>
           <span className="grow" />
@@ -204,7 +204,7 @@ function ResourcePanel({ s, onClose }: { s: RunState; onClose: () => void }) {
             {s.tasks[a.taskId]?.title}
           </span>
           <span className="bar grow">
-            <i style={{ width: `${(tok / max) * 100}%`, background: a.provider === 'codex' ? 'var(--ion)' : 'var(--ember)' }} />
+            <i style={{ width: `${(tok / max) * 100}%`, background: a.provider === 'codex' ? 'var(--ion)' : a.provider === 'local' ? 'var(--leaf)' : 'var(--ember)' }} />
           </span>
           <span className="mono" style={{ width: 52, textAlign: 'right' }}>
             {fmtTokens(tok)}

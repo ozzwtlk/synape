@@ -5,11 +5,16 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { billableTokens, canonicalize, foldEvents, initialState, type EventEnvelope, type PermissionLevel, type RunState } from '@synape/core';
 import { createEngine, dataDir, EventStore, startServer } from './index.ts';
+import { accessToken, reachableUrls } from './net.ts';
+import { localCommand } from './local.ts';
 
 const HELP = `synape — event-sourced multi-provider agent orchestration
 
 Usage:
-  synape serve [--port 7420]                  start the engine + web UI (http://127.0.0.1:7420)
+  synape serve [--port 7420] [--host 0.0.0.0]  start the engine + web UI. Reachable from this machine,
+                                              your LAN and Tailscale; other devices need the access link
+  synape url [--rotate]                       print the access links for other devices (--rotate: new token)
+  synape local [serve|status]                 run / inspect the local model server (llama.cpp)
   synape run "<objective>" [options]          run headless in this terminal until done
       --workspace <dir>   (default: cwd)       --ceiling read|write|execute|network
       --extra-dir <dir>   (repeatable)         --max-depth <n>   --max-agents <n>
@@ -26,6 +31,8 @@ const { values: o, positionals } = parseArgs({
   allowPositionals: true,
   options: {
     port: { type: 'string', default: process.env.SYNAPE_PORT ?? '7420' },
+    host: { type: 'string', default: process.env.SYNAPE_HOST ?? '0.0.0.0' },
+    rotate: { type: 'boolean' },
     workspace: { type: 'string' },
     ceiling: { type: 'string' },
     'extra-dir': { type: 'string', multiple: true },
@@ -129,17 +136,30 @@ function printEvent(e: EventEnvelope, s: RunState) {
   }
 }
 
+async function printAccessLinks(port: number, host: string, rotate = false) {
+  const urls = await reachableUrls(port, host);
+  if (!urls.length) return console.log('  (loopback only: start with --host 0.0.0.0 to allow LAN/Tailscale)');
+  const t = accessToken(dir, rotate);
+  console.log('  other devices (open once per browser; the link signs it in):');
+  for (const u of urls) console.log(`    ${u.label.padEnd(16)} ${u.url}/?token=${t}`);
+}
+
 async function main() {
   if (o.help || !cmd) return console.log(HELP);
+  if (cmd === 'url') return printAccessLinks(Number(o.port), o.host!, o.rotate);
+  if (cmd === 'local') return localCommand(positionals[1] ?? 'status', dir);
   if (cmd === 'serve') {
     const unlock = lock();
     const engine = await createEngine({ log: (m) => console.error(m) });
     const here = dirname(fileURLToPath(import.meta.url));
     const uiDir = resolve(here, '../../ui/dist');
     const port = Number(o.port);
-    const srv = startServer({ engine, port, uiDir });
+    const host = o.host!;
+    const srv = startServer({ engine, port, uiDir, host });
     for (const p of engine.providers.values()) console.log(`  ${p.available ? '✓' : '✗'} ${p.label} ${p.version ?? ''} ${p.auth ?? p.reason ?? ''}`);
-    console.log(`\n  synape listening on http://127.0.0.1:${port}\n  data: ${dir}\n`);
+    console.log(`\n  synape listening on http://127.0.0.1:${port}`);
+    await printAccessLinks(port, host);
+    console.log(`  data: ${dir}\n`);
     const stop = async () => {
       console.log('\nshutting down: running agents will be marked interrupted and resumed on next start…');
       await engine.shutdown();

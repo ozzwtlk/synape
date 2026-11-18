@@ -173,7 +173,7 @@ export function NewRun({ onClose, providers }: { onClose: () => void; providers?
             <span className="eyebrow">Providers</span>
             <div className="row">
               {providers?.providers.map((p) => (
-                <label key={p.id} className={`chip ${p.available ? (p.id === 'codex' ? 'ion' : 'ember') : ''}`} title={p.reason ?? p.auth}>
+                <label key={p.id} className={`chip ${p.available ? (p.id === 'codex' ? 'ion' : p.id === 'local' ? 'leaf' : 'ember') : ''}`} title={p.reason ?? p.auth}>
                   <input type="checkbox" disabled={!p.available} checked={allowed.includes(p.id)} onChange={(e) => setAllowed((a) => (e.target.checked ? [...a, p.id] : a.filter((x) => x !== p.id)))} />
                   {p.label}
                   {!p.available && ' (unavailable)'}

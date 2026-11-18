@@ -19,8 +19,10 @@
   --text-4: #48517a;
 
   --ember: #ff9f6e; /* Anthropic / Claude Code */
+  --leaf: #b6f35c; /* local model (llama.cpp) */
   --ember-soft: rgba(255, 159, 110, 0.16);
   --ion: #5ee7ff; /* OpenAI / Codex */
+  --leaf-soft: rgba(182, 243, 92, 0.14);
   --ion-soft: rgba(94, 231, 255, 0.14);
   --nucleus: #b8a6ff; /* orchestration */
   --nucleus-soft: rgba(184, 166, 255, 0.16);
@@ -224,6 +226,11 @@ select {
   color: var(--ion);
   border-color: rgba(94, 231, 255, 0.32);
   background: var(--ion-soft);
+}
+.chip.leaf {
+  color: var(--leaf);
+  border-color: rgba(182, 243, 92, 0.32);
+  background: var(--leaf-soft);
 }
 .chip.nucleus {
   color: var(--nucleus);

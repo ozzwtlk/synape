@@ -16,6 +16,7 @@ Synape was built for scientific work, where a result is only worth something onc
 - **Paper & figures.** A built-in PDF viewer for the manuscript, plus a provenance panel. It shows every figure the agents produced, grouped by the node that produced it (with model and verification status), and which figures `main.tex` actually `\includegraphics`, following `\input`/`\include`. Figures are snapshotted when an agent finishes, so later edits can't rewrite provenance.
 - **Outputs per node.** Each node's *Outputs* tab lists exactly the files it wrote. In git workspaces this is checked against git, so a fresh worktree checkout isn't mistaken for work.
 - **A short answer at the end.** The final synthesis leads with a TL;DR (the result with its uncertainty, what is verified, the biggest open issue). The *Summary* panel opens when a run finishes, with verification counts, failures, deliverables and per-workstream one-liners.
+- **A local model for the bulky work.** Reading and digesting PDFs, extraction and summaries can run on your own GPU through llama.cpp (default: Qwen3.6-35B-A3B, 262k context), costing no subscription quota. Its results are still reviewed by a cloud model of another family.
 - **Runs that survive usage limits.** When a subscription window is exhausted, the run pauses and resumes automatically at the reset time, without spending retries. Models your plan doesn't include can be switched off, and any node can be pinned to a specific model.
 
 ## What it does
@@ -43,15 +44,18 @@ All screenshots come from real runs; nothing is mocked.
 - At least one provider, installed and logged in:
   - [Claude Code](https://docs.claude.com/en/docs/claude-code): `claude` on PATH, logged in.
   - [Codex CLI](https://github.com/openai/codex): `codex` on PATH, `codex login`.
-- Optional: `git` (worktree isolation), `gh` (pull requests).
+  - Optional, a [local model](#local-models) through llama.cpp.
+- Optional: `git` (worktree isolation), `gh` (pull requests), poppler (`pdftotext`, `pdftoppm`) for PDFs.
 
 ## Quick start
 
 ```bash
 pnpm install
 pnpm build            # builds the UI
-pnpm start            # engine + UI on http://127.0.0.1:7420
+pnpm start            # engine + UI on port 7420: this machine, your LAN and Tailscale
 ```
+
+`pnpm start` prints an access link for each network it is reachable on (Tailscale MagicDNS name and IP, LAN IP). Open one once on each phone or laptop. The link's token is swapped for a cookie, so after that the plain address works. `pnpm synape url` prints the links again, and `--rotate` revokes every device. To stay on this machine only, use `pnpm start --host 127.0.0.1`.
 
 Development, with hot reload for both sides:
 
@@ -76,12 +80,63 @@ Data lives in `~/.local/share/synape` (override with `SYNAPE_HOME`): `synape.db`
 
 | Area | What it shows |
 |---|---|
-| **Graph** (centre) | Every node is drawn like a particle-detector event display, and every mark encodes real data. **Orchestrators** are progress dials: one outer segment per subtask, coloured by its state and flowing while it runs, with decay tracks to each child and energy deposits scaled by tokens. **Workers** show their tool activity over time as calorimeter towers (angle = time, height = activity, tint = program run), recent tool calls as tracks, an inner context-usage gauge, and a radar sweep while live. **Reviews** are reticles carrying the verdict. **Computations** are hexagonal crystals coloured by program. Colours: ember = Claude, ion = Codex, violet = orchestration, green ring = verified. Switch between *Orbit* and *Flow*, collapse clusters, or use *Focus*. |
+| **Graph** (centre) | Every node is drawn like a particle-detector event display, and every mark encodes real data. **Orchestrators** are progress dials: one outer segment per subtask, coloured by its state and flowing while it runs, with decay tracks to each child and energy deposits scaled by tokens. **Workers** show their tool activity over time as calorimeter towers (angle = time, height = activity, tint = program run), recent tool calls as tracks, an inner context-usage gauge, and a radar sweep while live. **Reviews** are reticles carrying the verdict. **Computations** are hexagonal crystals coloured by program. Colours: ember = Claude, ion = Codex, leaf = local model, violet = orchestration, green ring = verified. Switch between *Orbit* and *Flow*, collapse clusters, or use *Focus*. |
 | **Summary / Paper** (top) | *★ Summary*: the TL;DR and verification status. *◫ Paper*: the manuscript PDF beside every produced figure and its provenance. |
 | **Inspector** | Objective, acceptance criteria, result, reviews, agent state, tokens, context, escalations, dependencies, a model picker (pin this node to a model), the live terminal and tool calls, **outputs** (figures and files the node wrote, with previews), artifacts (reports, diffs, plans, verdicts), and the routing explanation with the full candidate table. Expand it into a wide workspace. |
 | **Command** (right) | Talk to the orchestrator: follow-up instructions re-plan the live graph. Select an agent and tick *Ask … directly* to question it in its own resumed session (read-only). Approvals appear here. Task chips focus the graph. |
 | **HUD** (top) | Tokens, cache reads, agents and subscription windows. Click it for the full resource breakdown. Pause, resume and cancel live there too, along with *Git* (approval-gated publication) and *Fleet* (providers, catalog, learned performance). |
 | **Timeline** (bottom) | Scrub or replay the whole run from the persisted event log. |
+
+## Remote access (LAN and Tailscale)
+
+The server listens on all interfaces, but answers only loopback, private LAN (10/8, 172.16/12, 192.168/16, link-local) and Tailscale (100.64/10, `fd7a:115c:a1e0::/48`) addresses. Any other address gets 403. Requests from another device also need the access token, stored in `~/.local/share/synape/access-token` (mode 0600). Send it once with `?token=…`, which sets an HttpOnly cookie, or as `Authorization: Bearer …`. Requests from this machine don't need a token, but they must use a localhost, IP or `*.ts.net` host name, which blocks DNS rebinding. Mutations also need the per-process CSRF token, as before. The traffic itself is plain HTTP: over Tailscale it is encrypted by WireGuard, but on a shared LAN you should treat it as visible to others on the network.
+
+## Local models
+
+Synape can run agents on a local model served by [llama.cpp](https://github.com/ggml-org/llama.cpp). It starts `llama-server` the first time a task is routed to it, and stops it after 20 idle minutes to free the VRAM. It takes the bulky, low-difficulty work (PDF digests, extraction, summaries and simple edits), the same tier the router would give Haiku. Its tokens don't count against run budgets, and its results are still reviewed by a cloud model of another family.
+
+**Default model.** [Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) is an Apache-2.0 hybrid-attention MoE (35B total, 3B active, 262,144-token context). Qwen reports 73.4 on SWE-bench Verified for it, against about 73 for Claude Haiku 4.5. That makes it Haiku-class for agentic work, though weaker on hard reasoning. The default build is Unsloth's `UD-Q4_K_XL` with the multi-token-prediction head (22.9 GB).
+
+**Tuned for one 16 GB GPU and 32 GB of RAM.** The adapter launches llama-server with:
+- `--fit on`: attention, shared experts and the KV cache stay in VRAM, and the remaining routed experts are served from RAM.
+- `-c 262144 -np 1`: the full context window, in one slot.
+- Flash attention and a q8 KV cache. Only 10 of the model's 40 layers keep a KV cache, so the full window costs about 2.7 GB.
+- MTP speculative decoding (`--spec-type draft-mtp`). If that fails, it retries without it.
+- Large prompt batches, for long PDFs.
+- Text only (no vision projector), and bound to `127.0.0.1`.
+- Qwen's recommended sampling.
+
+`pnpm synape local args` prints the exact command.
+
+**Tools and skills.** The local agent has its own tool loop, gated by the same permission levels as the CLI agents:
+- `list_dir`, `read_file`, `grep` and `pdf_text` (paged, via poppler) when reading;
+- `write_file` and `edit_file` with write permission;
+- `bash` with execute permission.
+
+Paths are confined to the workspace and its extra directories, and the check follows symlinks. A built-in skills preamble tells the model how to work. For example, it digests a PDF in 12-page chunks and cites pages, and extracts values with units and sources or says "not found". The local slot runs one task at a time. Once two tasks are queued for it, further easy tasks go to the cloud instead.
+
+```bash
+# 1. llama.cpp: unpack a release (Vulkan build for AMD/Intel; CUDA/ROCm builds also work)
+mkdir -p ~/.local/opt && cd ~/.local/opt
+curl -LO https://github.com/ggml-org/llama.cpp/releases/download/<tag>/llama-<tag>-bin-ubuntu-vulkan-x64.tar.gz
+tar xzf llama-*-vulkan-x64.tar.gz && ln -sfn "$PWD/llama-<tag>" ~/.local/opt/llama.cpp
+# 2. the model (resumable, sha256-verified)
+scripts/get-local-model.sh
+# 3. check
+pnpm synape local status
+```
+
+| Setting (`settings.json` → `local`, or env) | Default | |
+|---|---|---|
+| `url` / `SYNAPE_LOCAL_URL` | `http://127.0.0.1:8091` | Use an already running server instead |
+| `bin` / `SYNAPE_LLAMA_SERVER` | newest `~/.local/opt/llama.cpp*/llama-server`, else PATH | |
+| `model` / `SYNAPE_LOCAL_MODEL` | best `.gguf` in `~/.local/share/llm/models` | |
+| `ctx` / `SYNAPE_LOCAL_CTX` | 262144 | |
+| `idleMinutes` / `SYNAPE_LOCAL_IDLE_MIN` | 20 | 0 keeps it loaded |
+| `autostart` / `SYNAPE_LOCAL_AUTOSTART` | true | |
+| `vramMarginMiB`, `extraArgs` | 768, `[]` | VRAM left for the desktop; extra llama-server flags |
+
+The server log is at `~/.local/share/synape/local-llm.log`. You can switch the model off in *Fleet*, or pin any node to it from the Inspector.
 
 ## Configuration
 
@@ -95,12 +150,12 @@ Each run is configured in the *New mission* dialog or through the API:
 | `qualityBias` | `0.5` | 0 = economy, 1 = reliability (raises the success bar) |
 | `limits.maxDepth` | 2 | Delegation depth (root = 0) |
 | `limits.maxConcurrentAgents` | 6 | Per run |
-| `limits.providerConcurrency` | claude 4, codex 3 | Global per provider |
+| `limits.providerConcurrency` | claude 4, codex 3, local 1 | Global per provider |
 | `limits.maxAgentsPerTask` / `maxTotalAgents` / `maxTasks` | 5 / 40 / 40 | Spawn control |
 | `limits.maxRetries` / `taskTimeoutMs` | 2 / 30 min | |
 | `budgets.maxTokens` / `maxTaskTokens` / `maxApiUsd` | 3M / – / – | The run pauses and asks for approval when exceeded |
 
-Environment: `SYNAPE_HOME`, `SYNAPE_PORT`, `SYNAPE_CLAUDE_BIN`, `SYNAPE_CODEX_BIN`.
+Environment: `SYNAPE_HOME`, `SYNAPE_PORT`, `SYNAPE_HOST` (default `0.0.0.0`), `SYNAPE_ALLOWED_HOSTS` (extra local host names), `SYNAPE_CLAUDE_BIN`, `SYNAPE_CODEX_BIN`, and the `SYNAPE_LOCAL_*` variables above.
 
 The model catalog with its skill priors and resource weights is in `packages/core/src/models.ts`. Its values are documented assumptions and are refined automatically by observed outcomes.
 

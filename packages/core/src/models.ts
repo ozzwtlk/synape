@@ -111,6 +111,23 @@ export const BUILTIN_MODELS: Omit<ModelProfile, 'available'>[] = [
     ruPer1kTokens: 8,
     latencyFactor: 1.6,
   },
+  {
+    // Local llama.cpp model (default: Qwen3.6-35B-A3B, 3B active). Haiku-class on
+    // agentic coding (SWE-bench Verified 73.4 vs ~73) but slower per token and
+    // weaker on hard reasoning; it costs no subscription quota, so the router sends
+    // it the bulky, low-difficulty work (reading PDFs, extraction, summaries).
+    // RU is a small nonzero "time/electricity" cost so ties go to faster models.
+    id: 'local:default',
+    provider: 'local',
+    model: 'local',
+    label: 'Local · Qwen3.6-35B-A3B',
+    billing: 'local',
+    tier: 1,
+    contextWindow: 262_144,
+    skill: { extraction: 0.8, analysis: 0.55, coding: 0.55, reasoning: 0.42, writing: 0.55, research: 0.5, review: 0.42, planning: 0.38 },
+    ruPer1kTokens: 0.08,
+    latencyFactor: 1.4,
+  },
 ];
 
 export const familyOf = (provider: string) => (provider === 'claude-code' ? 'anthropic' : provider === 'codex' ? 'openai' : provider);

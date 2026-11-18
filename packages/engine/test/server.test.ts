@@ -6,6 +6,8 @@ import { request } from 'node:http';
 import { Engine } from '../src/engine.ts';
 import { EventStore } from '../src/store.ts';
 import { startServer } from '../src/server.ts';
+import { accessToken, hostOf, isPrivateAddress } from '../src/net.ts';
+import { networkInterfaces } from 'node:os';
 import { ScriptedAdapter, isPlan, plannedTask } from './fakes.ts';
 
 const dir = mkdtempSync(join(tmpdir(), 'synape-srv-'));
@@ -22,19 +24,54 @@ const port = 17000 + Math.floor(Math.random() * 2000);
 const srv = startServer({ engine, port });
 afterAll(() => srv.close());
 
-function call(path: string, opts: { method?: string; host?: string; headers?: Record<string, string>; body?: unknown } = {}) {
-  return new Promise<{ status: number; body: string }>((ok, fail) => {
+function call(path: string, opts: { method?: string; host?: string; via?: string; headers?: Record<string, string>; body?: unknown } = {}) {
+  return new Promise<{ status: number; body: string; headers: Record<string, any> }>((ok, fail) => {
     const data = opts.body !== undefined ? JSON.stringify(opts.body) : undefined;
-    const r = request({ host: '127.0.0.1', port, path, method: opts.method ?? 'GET', headers: { host: opts.host ?? `127.0.0.1:${port}`, ...opts.headers } }, (res) => {
+    const r = request({ host: opts.via ?? '127.0.0.1', port, path, method: opts.method ?? 'GET', headers: { host: opts.host ?? `127.0.0.1:${port}`, ...opts.headers } }, (res) => {
       let b = '';
       res.on('data', (c) => (b += c));
-      res.on('end', () => ok({ status: res.statusCode!, body: b }));
+      res.on('end', () => ok({ status: res.statusCode!, body: b, headers: res.headers }));
     });
     r.on('error', fail);
     if (data) r.write(data);
     r.end();
   });
 }
+
+// A non-loopback address of this machine, to act as a "remote" LAN client.
+const lanIp = Object.values(networkInterfaces())
+  .flat()
+  .find((a) => a && !a.internal && a.family === 'IPv4' && isPrivateAddress(a.address))?.address;
+
+describe('network access', () => {
+  it('classifies private, Tailscale and public peers', () => {
+    for (const a of ['127.0.0.1', '::1', '::ffff:192.168.1.26', '10.1.2.3', '172.20.0.1', '100.101.102.103', 'fd7a:115c:a1e0::1234', 'fe80::1']) expect(isPrivateAddress(a), a).toBe(true);
+    for (const a of ['8.8.8.8', '172.32.0.1', '100.128.0.1', '2001:4860::8888', '::ffff:1.1.1.1']) expect(isPrivateAddress(a), a).toBe(false);
+    expect(hostOf('[::1]:7420')).toBe('::1');
+    expect(hostOf('box.tail1234.ts.net:7420')).toBe('box.tail1234.ts.net');
+  });
+
+  it('lets loopback clients use IP or tailnet host names', async () => {
+    expect((await call('/api/runs', { host: `192.168.1.20:${port}` })).status).toBe(200);
+    expect((await call('/api/runs', { host: `box.tail1234.ts.net:${port}` })).status).toBe(200);
+  });
+
+  it.skipIf(!lanIp)('requires the access token from LAN clients and trades it for a cookie', async () => {
+    const host = `${lanIp}:${port}`;
+    expect((await call('/api/runs', { via: lanIp, host })).status).toBe(401);
+    expect((await call('/', { via: lanIp, host })).body).toContain('Synape is locked');
+    expect((await call('/?token=wrong', { via: lanIp, host })).status).toBe(401);
+    const token = accessToken(dir);
+    const r = await call(`/?token=${token}`, { via: lanIp, host });
+    expect(r.status).toBe(302);
+    expect(r.headers.location).toBe('/');
+    const set = String(r.headers['set-cookie']);
+    expect(set).toMatch(/HttpOnly/);
+    const cookie = set.split(';')[0];
+    expect((await call('/api/runs', { via: lanIp, host, headers: { cookie } })).status).toBe(200);
+    expect((await call('/api/runs', { via: lanIp, host, headers: { authorization: `Bearer ${token}` } })).status).toBe(200);
+  });
+});
 
 describe('server security', () => {
   it('rejects foreign Host headers (DNS rebinding)', async () => {

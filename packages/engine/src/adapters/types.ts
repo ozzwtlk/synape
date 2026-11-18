@@ -47,6 +47,8 @@ export interface ProviderAdapter {
   id: string;
   detect(): Promise<ProviderInfo>;
   run(spec: AgentRunSpec): AsyncIterable<AdapterEvent>;
+  /** Release long-lived resources (e.g. a model server this adapter started). */
+  shutdown?(): void;
 }
 
 export const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}… [${s.length - n} more chars]` : s);

@@ -20,7 +20,7 @@ const nodeTypes = { task: TaskNode, compute: ComputeNode, orbit: OrbitTrack };
 const edgeTypes = { synapse: SynapseEdge };
 const PULSE_MS = 1400;
 
-const famColor = (p?: string) => (familyOfProvider(p) === 'anthropic' ? '#ff9f6e' : familyOfProvider(p) === 'openai' ? '#5ee7ff' : '#8b95c9');
+const famColor = (p?: string) => (familyOfProvider(p) === 'anthropic' ? '#ff9f6e' : familyOfProvider(p) === 'openai' ? '#5ee7ff' : familyOfProvider(p) === 'local' ? '#b6f35c' : '#8b95c9');
 
 function neighborhood(s: RunState, id: string): Set<string> {
   const out = new Set([id]);
@@ -80,7 +80,7 @@ export function Graph() {
       if (t.kind === 'review') continue;
       const ka = latestAgent(state, t);
       const kfam = familyOfProvider(ka?.provider);
-      const color = t.kind === 'orchestrate' ? C.nucleus : kfam === 'anthropic' ? C.ember : kfam === 'openai' ? C.ion : C.idle;
+      const color = t.kind === 'orchestrate' ? C.nucleus : kfam === 'anthropic' ? C.ember : kfam === 'openai' ? C.ion : kfam === 'local' ? C.leaf : C.idle;
       kidsOf.set(t.parentTaskId, [...(kidsOf.get(t.parentTaskId) ?? []), { id: t.id, status: t.status, verified: t.verified, color, tokens: tokensOf(t.usage), live: isActive(ka) }]);
     }
     const FIG = /\.(png|jpe?g|gif|webp|svg|pdf|eps)$/i;

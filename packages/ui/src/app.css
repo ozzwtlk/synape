@@ -1417,3 +1417,15 @@ input[type='range'] {
   background: #fff;
   box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
 }
+
+/* local model family */
+.tnode.tone-live.fam-local {
+  border-color: rgba(182, 243, 92, 0.6);
+  box-shadow: 0 0 0 1px rgba(182, 243, 92, 0.15), 0 0 32px -6px rgba(182, 243, 92, 0.45);
+}
+.fam-local .tn-tool,
+.fam-text-local,
+.fam-chip-local,
+.agent-pill.fam-local {
+  color: var(--leaf);
+}

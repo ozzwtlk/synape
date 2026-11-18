@@ -18,7 +18,9 @@ packages/
     engine.ts    scheduler, delegation, review loop, escalation, recovery, chat, git actions
     prompts.ts   prompt builders, JSON schemas, context packaging
     workspace.ts git worktrees, integration branch, repo inspection
-    adapters/    claude.ts (Claude Code CLI), codex.ts (Codex CLI), proc.ts (process groups)
+    adapters/    claude.ts (Claude Code CLI), codex.ts (Codex CLI), local.ts (llama.cpp tool loop), proc.ts (process groups)
+    local.ts     llama-server lifecycle: tuned launch, health, idle stop
+    net.ts       LAN/Tailscale access control
     server.ts    local HTTP API + Server-Sent Events
     cli.ts       `synape serve | run | ls | status | events | providers`
   ui/       React 19 + @xyflow/react; folds the same events with the same reducer
@@ -130,7 +132,7 @@ On start, `Engine.recover()` handles every run that was planning, running or pau
 
 ## 8. Server and UI
 
-`server.ts` binds to 127.0.0.1 and rejects foreign `Host` headers (DNS rebinding). It sends no CORS headers, and requires a per-process token header plus `application/json` on every mutation (CSRF). `GET /api/runs/:id/stream?after=N` is SSE: it subscribes first, then flushes the backlog, so there is no gap.
+`server.ts` binds to all interfaces, answers only loopback/LAN/Tailscale peers, requires the persistent access token from non-loopback clients (`net.ts`), and rejects rebinding-prone `Host` headers from loopback. It sends no CORS headers, and requires a per-process token header plus `application/json` on every mutation (CSRF). `GET /api/runs/:id/stream?after=N` is SSE: it subscribes first, then flushes the backlog, so there is no gap.
 
 The UI keeps a mutable `RunState`, applies streamed events with the shared reducer, and re-renders once per animation frame. Graph nodes are memoized on a state signature. Layouts are a radial *orbit* hierarchy and a layered *flow*. Low-power mode and `prefers-reduced-motion` disable the starfield, particles and breathing glow.
 

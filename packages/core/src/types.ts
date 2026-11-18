@@ -86,7 +86,7 @@ export const DEFAULT_LIMITS: Limits = {
   maxRetries: 2,
   maxTasks: 40,
   taskTimeoutMs: 30 * 60_000,
-  providerConcurrency: { 'claude-code': 4, codex: 3 },
+  providerConcurrency: { 'claude-code': 4, codex: 3, local: 1 },
 };
 
 export const DEFAULT_CONFIG: RunConfig = {

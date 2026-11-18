@@ -4,10 +4,12 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSyn
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { extname, join, resolve, sep } from 'node:path';
+import { isIP } from 'node:net';
 import { findPdfs, inferOutputs, texGraphics } from './outputs.ts';
 import { homedir } from 'node:os';
 import type { Engine } from './engine.ts';
 import { repoInfo } from './workspace.ts';
+import { accessToken, cookie, hostOf, isLoopback, isPrivateAddress, machineName, sameSecret } from './net.ts';
 
 /** Types for agent-produced files. Never text/html: those are shown as source. */
 const FILE_MIME: Record<string, string> = {
@@ -34,27 +36,42 @@ const MIME: Record<string, string> = {
 export interface ServerOptions {
   engine: Engine;
   port: number;
+  /** Interface to bind. Default 0.0.0.0: loopback, LAN and Tailscale. */
   host?: string;
   uiDir?: string;
+  /** Token required from non-loopback clients (see net.ts). Default: persisted in the data dir. */
+  accessToken?: string;
 }
 
 /**
  * Local HTTP API + Server-Sent Events.
  *
- * Security model (local-first):
- *  - binds to 127.0.0.1 only by default;
- *  - rejects requests whose Host header is not localhost (DNS rebinding);
+ * Security model (private network):
+ *  - binds to all interfaces, but only answers loopback, private-LAN and
+ *    Tailscale (100.64/10, fd7a:115c:a1e0::/48) peers; public addresses get 403;
+ *  - non-loopback clients must present the persistent access token, once, via
+ *    `?token=` (exchanged for an HttpOnly SameSite=Lax cookie) or a Bearer header;
+ *  - loopback clients must use a localhost/IP Host header (DNS rebinding);
  *  - no CORS headers, so other origins cannot read responses;
  *  - every mutating request needs the per-process token in `x-synape-token`
  *    (cross-site form posts cannot set custom headers).
  */
+const LOCKED_PAGE = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Synape · locked</title>
+<body style="font:15px system-ui;background:#05070d;color:#cfe3ff;display:grid;place-items:center;height:100vh;margin:0">
+<div style="max-width:420px;padding:24px"><h2 style="margin:0 0 8px">Synape is locked</h2>
+<p>Open the access link printed by <code>synape serve</code>, or run <code>synape url</code> on the host machine and open the link it prints on this device. You only need to do this once per browser.</p></div>`;
+
 export function startServer(opts: ServerOptions) {
   const { engine } = opts;
-  const host = opts.host ?? '127.0.0.1';
+  const host = opts.host ?? '0.0.0.0';
   const token = randomBytes(24).toString('hex');
-  const allowedHosts = new Set([`127.0.0.1:${opts.port}`, `localhost:${opts.port}`, `[::1]:${opts.port}`]);
-  // Vite dev server proxies with its own host.
-  for (const p of (process.env.SYNAPE_ALLOWED_HOSTS ?? 'localhost:5173,127.0.0.1:5173').split(',')) allowedHosts.add(p);
+  // Re-read so `synape url --rotate` takes effect without a restart.
+  const accessNow = () => opts.accessToken ?? accessToken(engine.dataDir);
+  const extraHosts = new Set((process.env.SYNAPE_ALLOWED_HOSTS ?? '').split(',').map((h) => hostOf(h.trim()).toLowerCase()).filter(Boolean));
+  const me = machineName();
+  /** Names a loopback client may use. Rebinding needs a DNS name, so IP literals are safe. */
+  const localName = (h: string) => h === 'localhost' || h === me || h === `${me}.local` || isIP(h) !== 0 || h.endsWith('.ts.net') || extraHosts.has(h);
+  const AUTH_COOKIE = 'synape_auth';
 
   const worktreesOf = (runId: string) => {
     const d = join(engine.dataDir, 'worktrees', runId);
@@ -91,10 +108,35 @@ export function startServer(opts: ServerOptions) {
   const server = createServer(async (req, res) => {
     try {
       const hostHeader = req.headers.host ?? '';
-      if (!allowedHosts.has(hostHeader)) return json(res, 403, { error: 'host not allowed' });
-      const url = new URL(req.url ?? '/', `http://${hostHeader}`);
+      const peer = req.socket.remoteAddress ?? '';
+      if (!isPrivateAddress(peer)) return json(res, 403, { error: 'only loopback, LAN and Tailscale clients are allowed' });
+      const url = new URL(req.url ?? '/', `http://${hostHeader || 'localhost'}`);
       const path = url.pathname;
       const method = req.method ?? 'GET';
+      if (isLoopback(peer)) {
+        // Vite's dev proxy and local browsers: refuse DNS-rebound names.
+        if (!localName(hostOf(hostHeader).toLowerCase())) return json(res, 403, { error: 'host not allowed' });
+      } else {
+        const access = accessNow();
+        const bearer = (req.headers.authorization ?? '').replace(/^Bearer\s+/i, '');
+        const q = url.searchParams.get('token') ?? undefined;
+        if (q && sameSecret(q, access) && method === 'GET') {
+          // Trade the link token for a cookie and drop it from the address bar.
+          url.searchParams.delete('token');
+          res.writeHead(302, {
+            location: url.pathname + url.search,
+            'set-cookie': `${AUTH_COOKIE}=${encodeURIComponent(access)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000`,
+            'cache-control': 'no-store',
+            'referrer-policy': 'no-referrer',
+          });
+          return res.end();
+        }
+        if (!sameSecret(cookie(req, AUTH_COOKIE), access) && !sameSecret(bearer, access)) {
+          if (path.startsWith('/api/')) return json(res, 401, { error: 'remote access needs the Synape access token (run `synape url`)' });
+          res.writeHead(401, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'" });
+          return res.end(LOCKED_PAGE);
+        }
+      }
 
       if (!path.startsWith('/api/')) return serveStatic(res, path);
       if (method !== 'GET') {

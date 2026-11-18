@@ -70,6 +70,9 @@ const countedAttempts = (s: RunState, t: Task) => t.agentIds.slice(t.attemptFloo
 
 const id = (p: string) => `${p}_${randomUUID().replace(/-/g, '').slice(0, 10)}`;
 
+/** Ready tasks allowed to wait for the (serialized) local model before overflowing to the cloud. */
+const LOCAL_QUEUE = 2;
+
 export class Engine {
   readonly store: EventStore;
   readonly dataDir: string;
@@ -182,6 +185,7 @@ export class Engine {
     for (const r of this.running.values()) r.abort.abort();
     const deadline = Date.now() + 8000;
     while (this.running.size && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
+    for (const a of this.adapters.values()) a.shutdown?.();
   }
 
   // ================================================================ events
@@ -546,7 +550,8 @@ export class Engine {
     }
 
     // 4. Budgets.
-    const used = billableTokens(s.totals);
+    // Local-model tokens cost no subscription quota: they don't count against the budget.
+    const used = billableTokens(s.totals) - (s.usageByProvider.local ? billableTokens(s.usageByProvider.local) : 0);
     if (run.config.budgets.maxTokens && used > run.config.budgets.maxTokens) {
       this.emit(runId, { type: 'limit.hit', limit: 'budget.maxTokens', detail: `${used} tokens used of ${run.config.budgets.maxTokens}` });
       this.emit(runId, { type: 'run.status', status: 'paused', reason: 'token budget exhausted' });
@@ -564,6 +569,7 @@ export class Engine {
     const ready = Object.values(s.tasks)
       .filter((t) => t.status === 'ready')
       .sort((a, b) => (a.kind === 'review' ? -1 : 0) - (b.kind === 'review' ? -1 : 0) || a.depth - b.depth || a.createdAt - b.createdAt);
+    let localQueued = 0;
     for (const t of ready) {
       if (activeAgents(s).length >= lim.maxConcurrentAgents) break;
       const totalAgents = Object.values(s.agents).filter((a) => a.status !== 'interrupted').length;
@@ -603,9 +609,20 @@ export class Engine {
         this.emit(runId, { type: 'task.status', taskId: t.id, status: 'failed', reason: (e as Error).message });
         continue;
       }
-      const cap = lim.providerConcurrency[decision.provider] ?? 3;
-      const busy = [...this.running.values()].filter((r) => r.provider === decision.provider).length;
-      if (busy >= cap) continue; // wait for a slot
+      // One llama-server slot owns the whole context window: local work is serialized.
+      const capOf = (p: string) => lim.providerConcurrency[p] ?? (p === 'local' ? 1 : 3);
+      const busyOf = (p: string) => [...this.running.values()].filter((r) => r.provider === p).length;
+      if (busyOf(decision.provider) >= capOf(decision.provider)) {
+        // A short queue for the local model is worth it (no quota spent); a long one is not.
+        if (decision.provider !== 'local' || t.pinnedModel || ++localQueued <= LOCAL_QUEUE) continue;
+        try {
+          decision = this.routeTask(s, t, ['local']);
+        } catch {
+          continue;
+        }
+        decision.explanation += `\nlocal model busy (${LOCAL_QUEUE} task(s) already waiting): overflow to cloud`;
+        if (busyOf(decision.provider) >= capOf(decision.provider)) continue;
+      }
       this.spawn(runId, t, decision);
     }
   }
@@ -618,10 +635,10 @@ export class Engine {
     return ap?.status === 'approved' ? t.permission : s.run.config.permissionCeiling;
   }
 
-  private routeTask(s: RunState, t: Task): RoutingDecision {
+  private routeTask(s: RunState, t: Task, excludeProviders: string[] = []): RoutingDecision {
     // Resume an interrupted session on the same model when possible.
     const last = t.agentIds.length ? s.agents[t.agentIds.at(-1)!] : undefined;
-    if (last?.status === 'interrupted' && last.sessionId && (!t.pinnedModel || t.pinnedModel === last.modelId)) {
+    if (last?.status === 'interrupted' && last.sessionId && (!t.pinnedModel || t.pinnedModel === last.modelId) && !excludeProviders.includes(last.provider)) {
       const m = this.models.find((x) => x.id === last.modelId && x.available);
       if (m) return { modelId: m.id, provider: m.provider, model: m.model, effort: m.effort, explanation: `Resuming interrupted session ${last.sessionId.slice(0, 8)} on ${m.label}`, candidates: [], assumptions: [], estTokens: 0 };
     }
@@ -641,7 +658,7 @@ export class Engine {
       stats: (m, c) => this.store.perfStats(m, c),
       saturated,
       quotaUtilization,
-      allowedProviders: s.run.config.providers,
+      allowedProviders: excludeProviders.length ? (s.run.config.providers ?? [...this.providers.keys()]).filter((p) => !excludeProviders.includes(p)) : s.run.config.providers,
       maxRetries: s.run.config.limits.maxRetries,
       qualityBias: s.run.config.qualityBias,
       authorModelId,
@@ -832,7 +849,7 @@ export class Engine {
           break;
         case 'usage':
           this.emit(runId, { type: 'usage', agentId, taskId, provider: agent.provider, model: agent.model, usage: ev.usage, final: false });
-          if (maxTaskTokens && billableTokens(ev.usage) > maxTaskTokens && !abort.signal.aborted) {
+          if (maxTaskTokens && agent.provider !== 'local' && billableTokens(ev.usage) > maxTaskTokens && !abort.signal.aborted) {
             this.emit(runId, { type: 'limit.hit', limit: 'budget.maxTaskTokens', detail: `agent used ${billableTokens(ev.usage)} tokens (max ${maxTaskTokens})`, taskId });
             abort.abort();
           }

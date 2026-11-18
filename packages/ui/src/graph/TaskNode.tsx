@@ -43,7 +43,7 @@ const statusTone = (t: Task) =>
   t.status === 'failed' ? 'bad' : t.status === 'cancelled' ? 'idle' : t.status === 'blocked' ? 'warn' : t.status === 'completed' ? (t.verified || t.verification === 'none' || t.kind !== 'work' ? 'ok' : 'warn') : t.status === 'running' || t.status === 'delegated' || t.status === 'awaiting_review' ? 'live' : 'idle';
 
 // Literal colors: SVG paint servers don't reliably resolve CSS variables.
-export const C = { ember: '#ff9f6e', ion: '#5ee7ff', nucleus: '#b8a6ff', ok: '#6dffb3', warn: '#ffd36b', bad: '#ff5c7a', idle: '#56628a', text: '#e6ebff' };
+export const C = { ember: '#ff9f6e', ion: '#5ee7ff', leaf: '#b6f35c', nucleus: '#b8a6ff', ok: '#6dffb3', warn: '#ffd36b', bad: '#ff5c7a', idle: '#56628a', text: '#e6ebff' };
 const TONE_COLOR: Record<string, string> = { ok: C.ok, warn: C.warn, bad: C.bad, live: C.text, idle: C.idle };
 
 const hash = (s: string) => {
@@ -256,7 +256,7 @@ function TaskNodeView({ data, selected }: NodeProps<TaskFlowNode>) {
   const review = t.kind === 'review';
   const d = orbSize(t);
   const verdict = review ? t.resultSummary?.split(' ')[0] : undefined;
-  const color = review && verdict ? (verdict === 'pass' ? C.ok : verdict === 'fail' ? C.bad : C.warn) : t.status === 'failed' ? C.bad : hub ? C.nucleus : fam === 'anthropic' ? C.ember : fam === 'openai' ? C.ion : C.idle;
+  const color = review && verdict ? (verdict === 'pass' ? C.ok : verdict === 'fail' ? C.bad : C.warn) : t.status === 'failed' ? C.bad : hub ? C.nucleus : fam === 'anthropic' ? C.ember : fam === 'openai' ? C.ion : fam === 'local' ? C.leaf : C.idle;
   const live = isActive(a) || (hub && t.status === 'delegated' && data.kids.some((k) => k.live));
   const motion = live && data.animate;
   const faint = !a && !hub;
