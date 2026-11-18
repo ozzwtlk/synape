@@ -98,7 +98,7 @@ export function route(task: Task, ctx: RouterContext): RoutingDecision {
   ];
   // A model the user pinned is allowed even if its provider isn't in the run's list.
   const allowed = (m: ModelProfile) => m.id === task.pinnedModel || !ctx.allowedProviders || ctx.allowedProviders.includes(m.provider);
-  const pool = ctx.models.filter((m) => m.available && allowed(m));
+  const pool = ctx.models.filter((m) => m.available && allowed(m) && !m.preworkOnly);
   const author = ctx.authorModelId ? ctx.models.find((m) => m.id === ctx.authorModelId) : undefined;
   const otherFamilyAvailable = author ? pool.some((m) => familyOf(m.provider) !== familyOf(author.provider)) : false;
   const needP = requiredSuccess(task.criticality, ctx.qualityBias);
@@ -151,7 +151,9 @@ export function route(task: Task, ctx: RouterContext): RoutingDecision {
       // User's explicit choice wins over every routing gate except availability.
       if (m.id !== task.pinnedModel) rejectedBecause = `task pinned to ${task.pinnedModel} by user`;
       else if (!m.available) rejectedBecause = m.unavailableReason ?? 'provider unavailable';
+      else if (q !== undefined && q > 0.95) rejectedBecause = `quota ${Math.round(q * 100)}% used`;
     } else if (!m.available) rejectedBecause = m.unavailableReason ?? 'provider unavailable';
+    else if (m.preworkOnly) rejectedBecause = 'pre-work only (used while subscriptions are out of quota)';
     else if (m.tier < task.minTier) rejectedBecause = `below escalation floor (tier ${task.minTier})`;
     else if (task.excludedModels.includes(m.id)) rejectedBecause = 'failed this task before';
     else if (author && m.id === author.id) rejectedBecause = 'is the author (no self-review)';

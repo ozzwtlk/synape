@@ -187,27 +187,64 @@ describe('engine', () => {
     expect((engine.store.perfTable() as any[]).filter((r) => r.modelId === 'a:light' && r.successes < r.n)).toHaveLength(0);
   });
 
-  it('usage limits pause the run without spending retries, then resume cleanly', async () => {
-    let limited = true;
+  it('a usage limit re-routes work to another provider instead of pausing the run', async () => {
     const { engine } = setup((spec) => {
-      if (isPlan(spec)) return { structured: { summary: 'p', reply: 'ok', tasks: [plannedTask('q')] } };
+      if (isPlan(spec)) return { structured: { summary: 'p', reply: 'ok', tasks: [plannedTask('q', { complexity: 1 })] } };
       if (isSynth(spec)) return { text: '## Summary\ns' };
-      if (limited) return { ok: false, error: "You've hit your usage limit. Try again in 2 hours.", errorClass: 'quota' };
+      // Provider "a" (models light/strong) is out of quota; "b" (mid) is fine.
+      if (spec.model !== 'mid') return { ok: false, error: "You've hit your usage limit. Try again in 2 hours.", errorClass: 'quota' };
       return { text: '## Summary\nok' };
     });
     await engine.init();
     const runId = engine.createRun({ objective: 'quota', workspace: process.cwd() });
-    let s = await waitFor(engine, runId, (x) => x.run.status === 'paused');
+    const s = await waitFor(engine, runId, done);
+    expect(s.run.status).toBe('completed');
+    expect(Object.values(s.tasks).some((t) => t.statusReason?.startsWith('waiting'))).toBe(false);
     const q = Object.values(s.tasks).find((t) => t.title === 'Task q')!;
-    expect(q.status).toBe('ready');
     expect(q.excludedModels).toEqual([]);
-    expect(s.run.resumeAt! - Date.now()).toBeGreaterThan(110 * 60_000);
-    expect(Object.values(s.agents).filter((a) => a.taskId === q.id).every((a) => a.status === 'interrupted')).toBe(true);
+    expect(s.agents[q.agentIds.at(-1)!].provider).toBe('b');
+    expect(s.quotas['a:usage_limit']).toMatchObject({ status: 'rejected', utilization: 1 });
+    expect(s.quotas['a:usage_limit'].resetsAt! - Date.now()).toBeGreaterThan(110 * 60_000);
+    expect(s.messages.some((m) => /moves to other models/.test(m.text))).toBe(true);
+    await engine.shutdown();
+  });
+
+  it('when every capable provider is out of quota, tasks wait and free models do pre-work that the real task receives', async () => {
+    let limited = true;
+    const workerPrompts: string[] = [];
+    const script: Script = (spec) => {
+      if (isPlan(spec)) return { structured: { summary: 'p', reply: 'ok', tasks: [plannedTask('hard', { complexity: 3 })] } };
+      if (isSynth(spec)) return { text: '## Summary\ns' };
+      if (spec.model === 'auto:smart') return { text: '## Summary\nlocated eq. 3 in notes.tex\n## Sources\n- notes.tex:12\n## Draft (UNVERIFIED)\nx = 42' };
+      if (limited) return { ok: false, error: 'usage limit reached, try again in 3 hours', errorClass: 'quota' };
+      workerPrompts.push(spec.prompt);
+      return { text: '## Summary\nx = 42, checked' };
+    };
+    const dir = mkdtempSync(join(tmpdir(), 'synape-test-'));
+    const FREE: Omit<ModelProfile, 'available'> = { id: 'freellm:auto', provider: 'freellm', model: 'auto:smart', label: 'Free', billing: 'free', tier: 2, contextWindow: 100000, skill: { analysis: 0.7 }, ruPer1kTokens: 0.05, latencyFactor: 1, preworkOnly: true };
+    const engine = new Engine({ store: new EventStore(join(dir, 'db.sqlite')), adapters: [new ScriptedAdapter('a', script), new ScriptedAdapter('b', script), new ScriptedAdapter('freellm', script)], dataDir: dir, models: [...MODELS, FREE] });
+    await engine.init();
+    const runId = engine.createRun({ objective: 'prework', workspace: process.cwd() });
+    let s = await waitFor(engine, runId, (s) => Object.values(s.tasks).some((t) => t.preworkFor && t.status === 'completed'));
+    const hard = Object.values(s.tasks).find((t) => t.title === 'Task hard')!;
+    expect(hard.status).toBe('ready');
+    expect(hard.statusReason).toMatch(/waiting for usage limits/);
+    expect(s.run.status).toBe('running');
+    const pre = Object.values(s.tasks).find((t) => t.preworkFor === hard.id)!;
+    expect(pre.pinnedModel).toBe('freellm:auto');
+    expect(pre.permission).toBe('read');
+    expect(s.messages.some((m) => /Free frontier models are preparing a head start/.test(m.text))).toBe(true);
+    // Free-model agents don't count against the agent limit or the token budget.
+    expect(engine['missionTokens'](s)).toBeLessThan(Object.values(s.agents).reduce((n, a) => n + a.usage.inputTokens, 0));
+    // Quota is back (user pressed Resume): the real task runs with the head start.
     limited = false;
     engine.resume(runId);
     s = await waitFor(engine, runId, done);
     expect(s.run.status).toBe('completed');
-    expect(s.run.resumeAt).toBeUndefined();
+    expect(workerPrompts.some((p) => /pre-work/.test(p) && /x = 42/.test(p) && /UNVERIFIED/.test(p))).toBe(true);
+    // Only one pre-work per task, and it is not reported as a result of the mission.
+    expect(Object.values(s.tasks).filter((t) => t.preworkFor)).toHaveLength(1);
+    expect(s.run.memory).not.toMatch(/Pre-work:/);
     await engine.shutdown();
   });
 

@@ -75,111 +75,157 @@ export class LocalAdapter implements ProviderAdapter {
   }
 
   async *run(spec: AgentRunSpec): AsyncIterable<AdapterEvent> {
-    const started = Date.now();
     const signal = AbortSignal.any([spec.signal, AbortSignal.timeout(spec.timeoutMs)]);
-    const why = (): ErrorClass => (spec.signal.aborted ? 'cancelled' : 'timeout');
     const release = this.runtime.hold();
     try {
       if (!(await this.runtime.status()).up) yield { kind: 'system', text: 'starting local model server (first load can take a minute)…' };
       try {
         await this.runtime.ensure(signal);
       } catch (e) {
-        yield { kind: 'final', ok: false, text: '', error: `local model unavailable: ${(e as Error).message}`, errorClass: signal.aborted ? why() : 'provider' };
+        yield { kind: 'final', ok: false, text: '', error: `local model unavailable: ${(e as Error).message}`, errorClass: signal.aborted ? (spec.signal.aborted ? 'cancelled' : 'timeout') : 'provider' };
         return;
       }
       const cfg = this.runtime.config;
       const ctx = (await this.runtime.status()).ctx ?? cfg.ctx;
-
-      const sessionDir = join(spec.scratchDir, 'local-sessions');
-      mkdirSync(sessionDir, { recursive: true });
-      let sessionId = spec.resumeSessionId;
-      let messages: Msg[] = [];
-      if (sessionId && /^[\w-]+$/.test(sessionId) && existsSync(join(sessionDir, `${sessionId}.json`))) {
-        messages = JSON.parse(readFileSync(join(sessionDir, `${sessionId}.json`), 'utf8'));
-      } else {
-        sessionId = `local-${randomBytes(6).toString('hex')}`;
-        messages = [{ role: 'system', content: [LOCAL_SKILLS, spec.systemPrompt].filter(Boolean).join('\n\n') }];
-      }
-      messages.push({ role: 'user', content: spec.prompt });
-      const save = () => writeFileSync(join(sessionDir, `${sessionId}.json`), JSON.stringify(messages));
-      yield { kind: 'session', sessionId };
-      const tools = TOOLS.filter((t) => permissionRank(spec.permission) >= permissionRank(t.min));
-      yield { kind: 'system', text: `local ${spec.model} · tools ${tools.map((t) => t.name).join(', ')} · ctx ${ctx.toLocaleString()}` };
-
-      const usage: Usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costBasis: 'unavailable', contextWindow: ctx, peakContextTokens: 0 };
-      const roots = [spec.cwd, ...spec.extraDirs].map(real);
-      let finalText = '';
-
-      for (let turn = 0; turn < MAX_TURNS; turn++) {
-        if ((usage.peakContextTokens ?? 0) > ctx * 0.8) compact(messages);
-        let res: Completion;
-        try {
-          res = await complete(cfg.url, { messages, tools: tools.map((t) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.parameters } })), max_tokens: 16_384 }, signal);
-        } catch (e) {
-          save();
-          const crash = !(await this.runtime.status()).up && this.runtime.lastError ? ` (server: ${this.runtime.lastError})` : '';
-          yield { kind: 'final', ok: false, text: finalText, error: `local model request failed: ${(e as Error).message}${crash}`, errorClass: signal.aborted ? why() : /context|too long|exceed/i.test(String(e)) ? 'task' : 'provider' };
-          return;
-        }
-        addUsage(usage, res, started);
-        yield { kind: 'usage', usage: { ...usage } };
-        if (res.reasoning) yield { kind: 'thinking', text: res.reasoning };
-        if (res.content) yield { kind: 'text', text: res.content };
-        messages.push({ role: 'assistant', content: res.content || null, ...(res.toolCalls.length ? { tool_calls: res.toolCalls } : {}) });
-        if (!res.toolCalls.length) {
-          finalText = res.content;
-          break;
-        }
-        for (const call of res.toolCalls) {
-          yield { kind: 'tool_start', id: call.id, name: call.function.name, input: clip(call.function.arguments, 600) };
-          const out = await runTool(call, tools, spec, roots, signal);
-          yield { kind: 'tool_end', id: call.id, ok: out.ok, output: clip(out.text, 800) };
-          messages.push({ role: 'tool', tool_call_id: call.id, content: clip(out.text, TOOL_OUTPUT_CHARS) });
-        }
-        save();
-        if (signal.aborted) {
-          yield { kind: 'final', ok: false, text: finalText, error: why() === 'timeout' ? 'timed out' : 'cancelled', errorClass: why() };
-          return;
-        }
-      }
-      save();
-      if (!finalText) {
-        yield { kind: 'final', ok: false, text: '', error: `no final answer after ${MAX_TURNS} turns`, errorClass: 'task' };
-        return;
-      }
-
-      let structured: unknown;
-      if (spec.jsonSchema) {
-        structured = parseJson(finalText);
-        if (structured === undefined) {
-          // Constrained decoding: the server turns the schema into a grammar.
-          try {
-            const r = await complete(
-              cfg.url,
-              {
-                messages: [...messages, { role: 'user', content: 'Output only the final answer as JSON matching the required schema.' }],
-                response_format: { type: 'json_schema', json_schema: { name: 'result', schema: spec.jsonSchema, strict: true } },
-                chat_template_kwargs: { enable_thinking: false },
-                max_tokens: 8192,
-              },
-              signal,
-            );
-            addUsage(usage, r, started);
-            yield { kind: 'usage', usage: { ...usage } };
-            structured = parseJson(r.content);
-            if (structured !== undefined) finalText = r.content;
-          } catch {}
-        }
-        if (structured === undefined) {
-          yield { kind: 'final', ok: false, text: finalText, error: 'final answer is not valid JSON for the required schema', errorClass: 'task' };
-          return;
-        }
-      }
-      yield { kind: 'final', ok: true, text: finalText, structured };
+      yield* runChatAgent(spec, {
+        url: cfg.url,
+        model: 'local',
+        ctx,
+        label: 'local',
+        skills: LOCAL_SKILLS,
+        sessionPrefix: 'local',
+        grammarExtras: { chat_template_kwargs: { enable_thinking: false } },
+        explainFailure: async () => (!(await this.runtime.status()).up && this.runtime.lastError ? ` (server: ${this.runtime.lastError})` : ''),
+      });
     } finally {
       release();
     }
   }
+}
+
+/** An OpenAI-compatible chat endpoint driven by Synape's own agent loop. */
+export interface ChatEndpoint {
+  url: string;
+  apiKey?: string;
+  model: string;
+  /** Context window in tokens (for compaction). */
+  ctx: number;
+  label: string;
+  skills: string;
+  sessionPrefix: string;
+  /** Extra body fields for the schema-constrained retry. */
+  grammarExtras?: Record<string, unknown>;
+  /** Extra detail appended to request errors. */
+  explainFailure?: () => Promise<string>;
+  /** Classify a failed request (default: provider error unless it is a context overflow). */
+  classify?: (e: Error) => ErrorClass;
+  /** Called with response headers of each completion (e.g. to read which upstream served it). */
+  onHeaders?: (h: Record<string, string | string[] | undefined>) => string | undefined;
+}
+
+/**
+ * Tool-using agent loop over any OpenAI-compatible streaming chat API:
+ * permission-gated tools, resumable sessions, context compaction and a
+ * schema-constrained retry for structured answers.
+ */
+export async function* runChatAgent(spec: AgentRunSpec, ep: ChatEndpoint): AsyncIterable<AdapterEvent> {
+  const started = Date.now();
+  const signal = AbortSignal.any([spec.signal, AbortSignal.timeout(spec.timeoutMs)]);
+  const why = (): ErrorClass => (spec.signal.aborted ? 'cancelled' : 'timeout');
+  const ctx = ep.ctx;
+  const sessionDir = join(spec.scratchDir, `${ep.sessionPrefix}-sessions`);
+  mkdirSync(sessionDir, { recursive: true });
+  let sessionId = spec.resumeSessionId;
+  let messages: Msg[] = [];
+  if (sessionId && /^[\w-]+$/.test(sessionId) && existsSync(join(sessionDir, `${sessionId}.json`))) {
+    messages = JSON.parse(readFileSync(join(sessionDir, `${sessionId}.json`), 'utf8'));
+  } else {
+    sessionId = `${ep.sessionPrefix}-${randomBytes(6).toString('hex')}`;
+    messages = [{ role: 'system', content: [ep.skills, spec.systemPrompt].filter(Boolean).join('\n\n') }];
+  }
+  messages.push({ role: 'user', content: spec.prompt });
+  const save = () => writeFileSync(join(sessionDir, `${sessionId}.json`), JSON.stringify(messages));
+  yield { kind: 'session', sessionId };
+  const tools = TOOLS.filter((t) => permissionRank(spec.permission) >= permissionRank(t.min));
+  yield { kind: 'system', text: `${ep.label} ${ep.model} · tools ${tools.map((t) => t.name).join(', ')} · ctx ${ctx.toLocaleString()}` };
+
+  const usage: Usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costBasis: 'unavailable', contextWindow: ctx, peakContextTokens: 0 };
+  const roots = [spec.cwd, ...spec.extraDirs].map(real);
+  let finalText = '';
+  const classify = ep.classify ?? ((e: Error) => (/context|too long|exceed/i.test(String(e)) ? 'task' : 'provider'));
+  let lastRoute: string | undefined;
+
+  for (let turn = 0; turn < MAX_TURNS; turn++) {
+    if ((usage.peakContextTokens ?? 0) > ctx * 0.8) compact(messages);
+    let res: Completion;
+    try {
+      res = await complete(ep, { messages, tools: tools.map((t) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.parameters } })), max_tokens: 16_384 }, signal);
+    } catch (e) {
+      save();
+      const extra = ep.explainFailure ? await ep.explainFailure() : '';
+      yield { kind: 'final', ok: false, text: finalText, error: `${ep.label} model request failed: ${(e as Error).message}${extra}`, errorClass: signal.aborted ? why() : classify(e as Error) };
+      return;
+    }
+    const routed = ep.onHeaders?.(res.headers);
+    if (routed && routed !== lastRoute) {
+      lastRoute = routed;
+      yield { kind: 'system', text: `served by ${routed}` };
+    }
+    addUsage(usage, res, started);
+    yield { kind: 'usage', usage: { ...usage } };
+    if (res.reasoning) yield { kind: 'thinking', text: res.reasoning };
+    if (res.content) yield { kind: 'text', text: res.content };
+    messages.push({ role: 'assistant', content: res.content || null, ...(res.toolCalls.length ? { tool_calls: res.toolCalls } : {}) });
+    if (!res.toolCalls.length) {
+      finalText = res.content;
+      break;
+    }
+    for (const call of res.toolCalls) {
+      yield { kind: 'tool_start', id: call.id, name: call.function.name, input: clip(call.function.arguments, 600) };
+      const out = await runTool(call, tools, spec, roots, signal);
+      yield { kind: 'tool_end', id: call.id, ok: out.ok, output: clip(out.text, 800) };
+      messages.push({ role: 'tool', tool_call_id: call.id, content: clip(out.text, TOOL_OUTPUT_CHARS) });
+    }
+    save();
+    if (signal.aborted) {
+      yield { kind: 'final', ok: false, text: finalText, error: why() === 'timeout' ? 'timed out' : 'cancelled', errorClass: why() };
+      return;
+    }
+  }
+  save();
+  if (!finalText) {
+    yield { kind: 'final', ok: false, text: '', error: `no final answer after ${MAX_TURNS} turns`, errorClass: 'task' };
+    return;
+  }
+
+  let structured: unknown;
+  if (spec.jsonSchema) {
+    structured = parseJson(finalText);
+    if (structured === undefined) {
+      // Constrained decoding where the server supports it (llama.cpp turns the schema into a grammar).
+      try {
+        const r = await complete(
+          ep,
+          {
+            messages: [...messages, { role: 'user', content: 'Output only the final answer as JSON matching the required schema.' }],
+            response_format: { type: 'json_schema', json_schema: { name: 'result', schema: spec.jsonSchema, strict: true } },
+            ...ep.grammarExtras,
+            max_tokens: 8192,
+          },
+          signal,
+        );
+        addUsage(usage, r, started);
+        yield { kind: 'usage', usage: { ...usage } };
+        structured = parseJson(r.content);
+        if (structured !== undefined) finalText = r.content;
+      } catch {}
+    }
+    if (structured === undefined) {
+      yield { kind: 'final', ok: false, text: finalText, error: 'final answer is not valid JSON for the required schema', errorClass: 'task' };
+      return;
+    }
+  }
+  yield { kind: 'final', ok: true, text: finalText, structured };
 }
 
 // ------------------------------------------------------------------ API
@@ -191,6 +237,7 @@ interface Completion {
   promptTokens: number;
   cachedTokens: number;
   completionTokens: number;
+  headers: Record<string, string | string[] | undefined>;
 }
 
 /**
@@ -198,15 +245,17 @@ interface Completion {
  * after 5 minutes without response headers, and llama-server only answers once
  * it has processed the whole prompt (a 200k-token PDF dump takes longer).
  */
-function openStream(base: string, body: Record<string, unknown>, signal: AbortSignal): Promise<IncomingMessage> {
-  const u = new URL(`${base}/v1/chat/completions`);
-  const payload = JSON.stringify({ model: 'local', stream: true, stream_options: { include_usage: true }, ...body });
+function openStream(ep: Pick<ChatEndpoint, 'url' | 'apiKey' | 'model'>, body: Record<string, unknown>, signal: AbortSignal): Promise<IncomingMessage> {
+  const u = new URL(`${ep.url.replace(/\/+$/, '').replace(/\/v1$/, '')}/v1/chat/completions`);
+  const payload = JSON.stringify({ model: ep.model, stream: true, stream_options: { include_usage: true }, ...body });
+  const headers: Record<string, string | number> = { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) };
+  if (ep.apiKey) headers.authorization = `Bearer ${ep.apiKey}`;
   return new Promise((ok, fail) => {
-    const req = (u.protocol === 'https:' ? httpsRequest : httpRequest)(u, { method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) }, signal }, (res) => {
+    const req = (u.protocol === 'https:' ? httpsRequest : httpRequest)(u, { method: 'POST', headers, signal }, (res) => {
       if ((res.statusCode ?? 500) >= 400) {
         let t = '';
         res.on('data', (c) => (t += c));
-        res.on('end', () => fail(new Error(`HTTP ${res.statusCode}: ${clip(t, 400)}`)));
+        res.on('end', () => fail(Object.assign(new Error(`HTTP ${res.statusCode}: ${clip(t, 400)}`), { status: res.statusCode, retryAfter: res.headers['retry-after'] })));
         res.on('error', fail);
         return;
       }
@@ -217,9 +266,9 @@ function openStream(base: string, body: Record<string, unknown>, signal: AbortSi
   });
 }
 
-async function complete(base: string, body: Record<string, unknown>, signal: AbortSignal): Promise<Completion> {
-  const res = await openStream(base, body, signal);
-  const out: Completion = { content: '', reasoning: '', toolCalls: [], promptTokens: 0, cachedTokens: 0, completionTokens: 0 };
+async function complete(ep: Pick<ChatEndpoint, 'url' | 'apiKey' | 'model'>, body: Record<string, unknown>, signal: AbortSignal): Promise<Completion> {
+  const res = await openStream(ep, body, signal);
+  const out: Completion = { content: '', reasoning: '', toolCalls: [], promptTokens: 0, cachedTokens: 0, completionTokens: 0, headers: res.headers };
   const calls = new Map<number, ToolCall>();
   const dec = new TextDecoder();
   let buf = '';
@@ -242,6 +291,7 @@ async function complete(base: string, body: Record<string, unknown>, signal: Abo
       const delta = d.choices?.[0]?.delta ?? {};
       if (delta.content) out.content += delta.content;
       if (delta.reasoning_content) out.reasoning += delta.reasoning_content;
+      else if (typeof delta.reasoning === 'string') out.reasoning += delta.reasoning;
       for (const tc of delta.tool_calls ?? []) {
         const k = tc.index ?? 0;
         const cur = calls.get(k) ?? { id: tc.id ?? `call_${k}_${randomBytes(3).toString('hex')}`, type: 'function' as const, function: { name: '', arguments: '' } };

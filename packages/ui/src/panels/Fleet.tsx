@@ -32,6 +32,7 @@ export function Fleet({ providers, onClose, onRefresh }: { providers?: Providers
             </div>
           ))}
         </div>
+        {providers?.freellm && <FreePanel cfg={providers.freellm} onSaved={onRefresh} />}
         <div className="eyebrow" style={{ margin: '16px 0 6px' }}>
           Model catalog (cold-start priors; refined by local history). Untick models your plan doesn't include. RU/1k includes the provider's quota weight (×, above).
         </div>
@@ -111,6 +112,50 @@ export function Fleet({ providers, onClose, onRefresh }: { providers?: Providers
           Success = accepted by independent review (or completed when no review was required). Provider errors (auth, rate limits) are not counted against a model.
         </p>
       </div>
+    </div>
+  );
+}
+
+/** FreeLLMAPI gateway for pre-work while subscriptions are out of quota. */
+function FreePanel({ cfg, onSaved }: { cfg: NonNullable<ProvidersResponse['freellm']>; onSaved: () => void }) {
+  const [url, setUrl] = useState(cfg.url);
+  const [key, setKey] = useState('');
+  const [err, setErr] = useState('');
+  const save = async (p: Parameters<typeof api.setFreeLLM>[0]) => {
+    setErr('');
+    try {
+      await api.setFreeLLM(p);
+      setKey('');
+      onSaved();
+    } catch (e) {
+      setErr((e as Error).message);
+    }
+  };
+  return (
+    <div className="card col" style={{ marginTop: 12, gap: 8 }}>
+      <div className="row" style={{ gap: 8 }}>
+        <b>Pre-work on free models</b>
+        <span className="grow" />
+        <label className="row" style={{ gap: 6 }}>
+          <input type="checkbox" checked={cfg.enabled} onChange={(e) => save({ enabled: e.target.checked })} aria-label="Enable pre-work on free models" />
+          enabled
+        </label>
+      </div>
+      <p className="faint" style={{ fontSize: 12, margin: 0 }}>
+        When Codex and Claude are out of quota and the local model isn't strong enough, free frontier models behind your{' '}
+        <a href="https://github.com/tashfeenahmed/freellmapi" target="_blank" rel="noreferrer">
+          FreeLLMAPI
+        </a>{' '}
+        gateway prepare a head start (sources, facts, an unverified draft, read-only). The subscription models finish the task after the reset. Prompts and the files these agents read go to third-party free tiers, which may log or train on them.
+      </p>
+      <div className="row" style={{ gap: 8 }}>
+        <input className="mono grow" value={url} onChange={(e) => setUrl(e.target.value)} aria-label="FreeLLMAPI URL" placeholder="http://127.0.0.1:3001" />
+        <input className="mono grow" type="password" value={key} onChange={(e) => setKey(e.target.value)} aria-label="FreeLLMAPI key" placeholder={cfg.hasKey ? 'key saved (enter to replace)' : 'freellmapi-… key'} />
+        <button className="btn sm" onClick={() => save({ url, apiKey: key || undefined })}>
+          Save
+        </button>
+      </div>
+      {err && <span className="bad">{err}</span>}
     </div>
   );
 }

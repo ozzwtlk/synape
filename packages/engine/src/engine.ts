@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   BUILTIN_MODELS,
@@ -40,6 +40,7 @@ import {
   parseStructured,
   planPrompt,
   replanPrompt,
+  preworkPrompt,
   reviewPrompt,
   synthesisPrompt,
   workPrompt,
@@ -73,6 +74,10 @@ const id = (p: string) => `${p}_${randomUUID().replace(/-/g, '').slice(0, 10)}`;
 
 /** Ready tasks allowed to wait for the (serialized) local model before overflowing to the cloud. */
 const LOCAL_QUEUE = 2;
+/** Most pre-work agents alive at once in a run (free tiers have tight per-minute limits). */
+const MAX_PREWORK = 6;
+/** A task whose pre-work is still running waits this long for it after quota returns. */
+const PREWORK_WAIT_MS = 15 * 60_000;
 
 export class Engine {
   readonly store: EventStore;
@@ -83,6 +88,8 @@ export class Engine {
   private running = new Map<string, RunningAgent>();
   private tickQueued = new Set<string>();
   private resumeTimers = new Map<string, NodeJS.Timeout>();
+  /** Re-tick a run when an exhausted provider's limit resets. */
+  private wakeTimers = new Map<string, { at: number; timer: NodeJS.Timeout }>();
   /** Agents aborted because the user switched their task's model. */
   private reassigning = new Set<string>();
   private worktrees: Worktrees;
@@ -120,7 +127,36 @@ export class Engine {
     return join(this.dataDir, 'settings.json');
   }
 
-  private readSettings(): { modelEnabled?: Record<string, boolean>; providerWeight?: Record<string, number> } {
+  /** settings.json may hold the FreeLLMAPI key: owner-only. */
+  private writeSettings(st: object) {
+    mkdirSync(this.dataDir, { recursive: true });
+    writeFileSync(this.settingsPath, JSON.stringify(st, null, 2), { mode: 0o600 });
+    chmodSync(this.settingsPath, 0o600);
+  }
+
+  /** Public view of the FreeLLMAPI settings (never the key itself). */
+  freeSettings() {
+    const f = this.readSettings().freellm ?? {};
+    return { url: f.url ?? 'http://127.0.0.1:3001', model: f.model ?? 'auto:smart', enabled: f.enabled ?? true, hasKey: !!(f.apiKey || process.env.SYNAPE_FREELLM_KEY) };
+  }
+
+  /** Configure the FreeLLMAPI gateway used for pre-work; an empty key keeps the saved one. */
+  async setFreeSettings(p: { url?: string; apiKey?: string; model?: string; enabled?: boolean }) {
+    const st = this.readSettings();
+    const cur = st.freellm ?? {};
+    if (p.url !== undefined && !/^https?:\/\/[^\s]+$/.test(p.url)) throw new Error('url must be http(s)://host:port');
+    st.freellm = {
+      ...cur,
+      ...(p.url !== undefined ? { url: p.url.replace(/\/+$/, '') } : {}),
+      ...(p.apiKey ? { apiKey: p.apiKey.trim() } : {}),
+      ...(p.model ? { model: p.model.trim() } : {}),
+      ...(p.enabled !== undefined ? { enabled: p.enabled } : {}),
+    };
+    this.writeSettings(st);
+    return this.detectProviders();
+  }
+
+  private readSettings(): { modelEnabled?: Record<string, boolean>; providerWeight?: Record<string, number>; freellm?: { url?: string; apiKey?: string; model?: string; enabled?: boolean } } {
     try {
       return JSON.parse(readFileSync(this.settingsPath, 'utf8'));
     } catch {
@@ -152,8 +188,7 @@ export class Engine {
     if (!(weight >= 0.1 && weight <= 20)) throw new Error('weight must be between 0.1 and 20');
     const st = this.readSettings();
     st.providerWeight = { ...st.providerWeight, [provider]: weight };
-    mkdirSync(this.dataDir, { recursive: true });
-    writeFileSync(this.settingsPath, JSON.stringify(st, null, 2));
+    this.writeSettings(st);
     this.applyModelSettings();
   }
 
@@ -162,8 +197,7 @@ export class Engine {
     if (!this.catalog.some((m) => m.id === modelId)) throw new Error(`unknown model ${modelId}`);
     const st = this.readSettings();
     st.modelEnabled = { ...st.modelEnabled, [modelId]: enabled };
-    mkdirSync(this.dataDir, { recursive: true });
-    writeFileSync(this.settingsPath, JSON.stringify(st, null, 2));
+    this.writeSettings(st);
     this.applyModelSettings();
   }
 
@@ -185,6 +219,8 @@ export class Engine {
       }
       this.emit(r.id, { type: 'recovery', detail: `Recovered run after restart; ${recovered.length} task(s) re-queued`, taskIds: recovered });
       if (r.status !== 'paused') this.scheduleTick(r.id);
+      // Paused for a usage limit (older versions paused the whole run): resume, so work re-routes to providers with quota left.
+      else if (/usage limit/i.test(s.run.statusReason ?? '')) this.resume(r.id, 'usage limits now re-route instead of pausing');
       else if (s.run.resumeAt) this.armAutoResume(r.id, s.run.resumeAt);
     }
   }
@@ -201,6 +237,8 @@ export class Engine {
     this.shuttingDown = true;
     for (const t of this.resumeTimers.values()) clearTimeout(t);
     this.resumeTimers.clear();
+    for (const w of this.wakeTimers.values()) clearTimeout(w.timer);
+    this.wakeTimers.clear();
     for (const r of this.running.values()) r.abort.abort();
     const deadline = Date.now() + 8000;
     while (this.running.size && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
@@ -282,7 +320,9 @@ export class Engine {
 
   resume(runId: string, reason = 'resumed by user') {
     const s = this.state(runId);
-    if (s.run.status !== 'paused' && s.run.status !== 'failed') return;
+    // Pressing Resume also retries providers marked out of quota (a still-limited one fails fast and is marked again).
+    if (reason === 'resumed by user') for (const q of this.exhausted(s)) this.emit(runId, { type: 'quota', provider: q.provider, window: q.window, utilization: 0, status: 'allowed' });
+    if (s.run.status !== 'paused' && s.run.status !== 'failed') return void this.scheduleTick(runId);
     this.clearAutoResume(runId);
     if (s.run.status === 'failed') this.reopenFailed(runId);
     this.emit(runId, { type: 'run.status', status: 'running', reason });
@@ -428,7 +468,7 @@ export class Engine {
     const s = this.state(runId);
     const lim = s.run.config.limits;
     const count = Object.values(s.tasks).filter((t) => !t.archived).length;
-    const structural = spec.kind === 'review' || spec.kind === 'synthesize' || spec.kind === 'plan';
+    const structural = spec.kind === 'review' || spec.kind === 'synthesize' || spec.kind === 'plan' || !!spec.preworkFor;
     if (!structural && count >= lim.maxTasks) {
       this.emit(runId, { type: 'limit.hit', limit: 'maxTasks', detail: `Refused task "${spec.title}": run already has ${count} tasks (max ${lim.maxTasks})` });
       return null;
@@ -548,6 +588,13 @@ export class Engine {
       }
     }
 
+    // Pre-work is pointless once its task has settled; don't let it hold up completion.
+    for (const t of Object.values(s.tasks)) {
+      if (!t.preworkFor || isTerminal(t)) continue;
+      const target = s.tasks[t.preworkFor];
+      if (!target || isTerminal(target)) this.cancelTask(runId, t.id, 'its task finished first', false);
+    }
+
     // 2. Delegated tasks complete when their latest synthesis does.
     for (const t of Object.values(s.tasks)) {
       if (t.status !== 'delegated') continue;
@@ -599,9 +646,10 @@ export class Engine {
       .filter((t) => t.status === 'ready')
       .sort((a, b) => (a.kind === 'review' ? -1 : 0) - (b.kind === 'review' ? -1 : 0) || a.depth - b.depth || a.createdAt - b.createdAt);
     let localQueued = 0;
+    const waiting: Task[] = [];
     for (const t of ready) {
       if (activeAgents(s).length >= lim.maxConcurrentAgents) break;
-      const totalAgents = Object.values(s.agents).filter((a) => a.status !== 'interrupted' && !s.tasks[a.taskId]?.archived).length;
+      const totalAgents = Object.values(s.agents).filter((a) => a.status !== 'interrupted' && a.provider !== 'freellm' && !s.tasks[a.taskId]?.archived).length;
       if (totalAgents >= lim.maxTotalAgents) {
         // Like the token budget: pause and ask, rather than failing work that is ready to run.
         this.emit(runId, { type: 'limit.hit', limit: 'maxTotalAgents', detail: `${totalAgents} agents spawned (max ${lim.maxTotalAgents})`, taskId: t.id }, { dedupeKey: `maxTotal:${run.chapter ?? 0}:${lim.maxTotalAgents}` });
@@ -632,10 +680,21 @@ export class Engine {
         const writer = activeAgents(s).some((a) => permissionRank(this.effectivePermission(s, s.tasks[a.taskId])) >= permissionRank('write'));
         if (writer) continue;
       }
+      // A free head start is being prepared: give it a little time before spending quota.
+      const pre = Object.values(s.tasks).find((x) => x.preworkFor === t.id && x.status === 'running');
+      if (pre && Date.now() - (pre.startedAt ?? 0) < PREWORK_WAIT_MS) continue;
       let decision: RoutingDecision;
       try {
         decision = this.routeTask(s, t);
       } catch (e) {
+        const resetAt = this.quotaWait(s, t);
+        if (resetAt) {
+          const reason = `waiting for usage limits to reset (~${new Date(resetAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})`;
+          if (t.statusReason !== reason) this.emit(runId, { type: 'task.status', taskId: t.id, status: 'ready', reason });
+          waiting.push(t);
+          this.armWake(runId, resetAt);
+          continue;
+        }
         this.emit(runId, { type: 'error', message: (e as Error).message, taskId: t.id, recoverable: false });
         this.emit(runId, { type: 'task.status', taskId: t.id, status: 'failed', reason: (e as Error).message });
         continue;
@@ -656,6 +715,66 @@ export class Engine {
       }
       this.spawn(runId, t, decision);
     }
+    if (waiting.length) this.startPrework(runId, waiting);
+  }
+
+  /**
+   * If a task cannot be routed only because providers are out of quota,
+   * the time the earliest exhausted window resets; otherwise undefined.
+   */
+  private quotaWait(s: RunState, t: Task): number | undefined {
+    const out = this.exhausted(s);
+    if (!out.length) return undefined;
+    try {
+      this.routeTask(s, t, [], true);
+    } catch {
+      return undefined;
+    }
+    return Math.min(...out.map((q) => q.resetsAt!));
+  }
+
+  /**
+   * Subscriptions are out of quota and the local model isn't capable enough
+   * for these tasks: let free frontier models prepare a head start (sources,
+   * facts, approach, an unverified draft) that the subscription model checks
+   * and finishes after the reset, using fewer tokens. Never replaces the work.
+   */
+  private startPrework(runId: string, waiting: Task[]) {
+    const s = this.state(runId);
+    const free = this.models.find((m) => m.preworkOnly && m.available && this.allowedProviders(s).includes(m.provider));
+    if (!free) return;
+    let live = Object.values(s.tasks).filter((x) => x.preworkFor && !isTerminal(x)).length;
+    const started: string[] = [];
+    for (const t of waiting) {
+      if (live >= MAX_PREWORK || t.kind !== 'work' || t.preworkFor) continue;
+      if (Object.values(s.tasks).some((x) => x.preworkFor === t.id)) continue;
+      const pid = this.createTask(
+        runId,
+        {
+          title: `Pre-work: ${t.title}`.slice(0, 80),
+          objective: t.objective,
+          kind: 'work',
+          category: t.category,
+          complexity: t.complexity,
+          criticality: 1,
+          acceptance: t.acceptance,
+          verification: 'none',
+          permission: 'read',
+          scope: t.scope,
+          preworkFor: t.id,
+        },
+        { parentTaskId: t.parentTaskId, depth: t.depth, deps: [] },
+        `prework:${t.id}`,
+      );
+      if (!pid) continue;
+      this.emit(runId, { type: 'task.model', taskId: pid, modelId: free.id });
+      started.push(t.title);
+      live++;
+    }
+    if (started.length) {
+      this.emit(runId, { type: 'chat.message', messageId: id('msg'), from: 'system', text: `Subscription models are out of quota and the local model isn't strong enough for: ${started.map((x) => `"${x}"`).join(', ')}. Free frontier models are preparing a head start (unverified notes and drafts); the real tasks run on subscription models after the reset and check that work.` });
+      this.scheduleTick(runId);
+    }
   }
 
   effectivePermission(s: RunState, t: Task): PermissionLevel {
@@ -666,17 +785,17 @@ export class Engine {
     return ap?.status === 'approved' ? t.permission : s.run.config.permissionCeiling;
   }
 
-  private routeTask(s: RunState, t: Task, excludeProviders: string[] = []): RoutingDecision {
-    // Resume an interrupted session on the same model when possible.
+  private routeTask(s: RunState, t: Task, excludeProviders: string[] = [], ignoreQuota = false): RoutingDecision {
+    const quotaUtilization: Record<string, number> = {};
+    if (!ignoreQuota) for (const q of Object.values(s.quotas)) if (q.utilization !== undefined && !(q.resetsAt && q.resetsAt < Date.now())) quotaUtilization[q.provider] = Math.max(quotaUtilization[q.provider] ?? 0, q.utilization);
+    // Resume an interrupted session on the same model when possible (not on a provider that is out of quota).
     const last = t.agentIds.length ? s.agents[t.agentIds.at(-1)!] : undefined;
-    if (last?.status === 'interrupted' && last.sessionId && (!t.pinnedModel || t.pinnedModel === last.modelId) && !excludeProviders.includes(last.provider)) {
+    if (last?.status === 'interrupted' && last.sessionId && (!t.pinnedModel || t.pinnedModel === last.modelId) && !excludeProviders.includes(last.provider) && (quotaUtilization[last.provider] ?? 0) <= 0.95) {
       const m = this.models.find((x) => x.id === last.modelId && x.available);
       if (m) return { modelId: m.id, provider: m.provider, model: m.model, effort: m.effort, explanation: `Resuming interrupted session ${last.sessionId.slice(0, 8)} on ${m.label}`, candidates: [], assumptions: [], estTokens: 0 };
     }
     const saturated = new Set<string>();
     for (const [p, cap] of Object.entries(s.run.config.limits.providerConcurrency)) if ([...this.running.values()].filter((r) => r.provider === p).length >= cap) saturated.add(p);
-    const quotaUtilization: Record<string, number> = {};
-    for (const q of Object.values(s.quotas)) if (q.utilization !== undefined && !(q.resetsAt && q.resetsAt < Date.now())) quotaUtilization[q.provider] = Math.max(quotaUtilization[q.provider] ?? 0, q.utilization);
     let authorModelId: string | undefined;
     if (t.kind === 'review' && t.reviewOf) {
       const target = s.tasks[t.reviewOf];
@@ -704,7 +823,7 @@ export class Engine {
   private missionTokens(s: RunState): number {
     let n = 0;
     for (const a of Object.values(s.agents)) {
-      if (a.provider === 'local') continue;
+      if (a.provider === 'local' || a.provider === 'freellm') continue;
       const t = s.tasks[a.taskId];
       // The root orchestrator only plans the first mission; follow-ups are separate replan tasks.
       if (t?.archived || (s.run.memory && t?.id === s.run.rootTaskId)) continue;
@@ -899,7 +1018,9 @@ export class Engine {
     const build = this.buildPrompt(runId, t, agentId, cwd);
     const prev = t.agentIds.length > 1 ? s.agents[t.agentIds.at(-2)!] : undefined;
     const resume = prev?.status === 'interrupted' && prev.sessionId && prev.modelId === agent.modelId ? prev.sessionId : undefined;
-    const prompt = resume ? 'You were interrupted (the orchestrator restarted). Continue the task from where you left off and give your complete final answer in the required format.' : build.prompt;
+    let prompt = resume ? 'You were interrupted (the orchestrator restarted or a usage limit was hit). Continue the task from where you left off and give your complete final answer in the required format.' : build.prompt;
+    const head = resume && !t.preworkFor ? this.headStart(s, t) : undefined;
+    if (head) prompt += `\n\nMeanwhile a pre-work agent (${head.model}, free tier) prepared these UNVERIFIED notes. Use what holds after checking it against the sources; note disagreements under "Open issues".\n<untrusted source="pre-work">\n${head.text}\n</untrusted>`;
     this.emit(runId, { type: 'agent.output', agentId, stream: 'system', text: `context package: ${prompt.length.toLocaleString()} chars (~${Math.round(prompt.length / 4).toLocaleString()} tokens), ${build.depCount} dependency summaries${resume ? `, resuming session ${resume}` : ''} · cwd ${cwd} · permission ${perm}` });
     this.emit(runId, { type: 'agent.status', agentId, status: 'running' });
 
@@ -996,6 +1117,17 @@ export class Engine {
     return text.replace(new RegExp(`${base}/(?:task_[a-z0-9]+|_integration)${sub.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'g'), ws);
   }
 
+  /** The latest completed pre-work for a task, as text for its prompt. */
+  private headStart(s: RunState, t: Task): { text: string; path: string; model: string } | undefined {
+    const pre = Object.values(s.tasks)
+      .filter((x) => x.preworkFor === t.id && x.status === 'completed')
+      .at(-1);
+    const art = pre?.artifactIds.map((a) => s.artifacts[a]).filter((a) => a?.kind === 'report').at(-1);
+    if (!pre || !art || !existsSync(art.path)) return undefined;
+    const served = s.agents[pre.agentIds.at(-1) ?? '']?.outputTail.find((l) => l.startsWith('served by '))?.slice(10);
+    return { text: readFileSync(art.path, 'utf8').slice(0, 14_000), path: art.path, model: served ?? 'a free model' };
+  }
+
   private depContext(runId: string, t: Task) {
     const s = this.state(runId);
     return t.deps
@@ -1052,11 +1184,15 @@ export class Engine {
         return { prompt: synthesisPrompt({ objective, parts, isRoot }), system: SYSTEM_WORKER, depCount: parts.length };
       }
       default: {
+        if (t.preworkFor) {
+          const target = s.tasks[t.preworkFor] ?? t;
+          return { prompt: preworkPrompt({ task: target, runObjective: this.currentObjective(s), deps: this.depContext(runId, target), workspace: cwd }), system: SYSTEM_WORKER, depCount: target.deps.length };
+        }
         const deps = this.depContext(runId, t);
         const lim = run.config.limits;
         const canDelegate = t.depth < lim.maxDepth && Object.values(s.tasks).filter((x) => !x.archived).length < lim.maxTasks - 3;
         return {
-          prompt: workPrompt({ task: t, runObjective: run.objective, parentObjective: parent?.kind === 'orchestrate' ? parent.objective : undefined, deps, workspace: cwd, originalWorkspace: run.workspace, canDelegate, reportPath: '' }),
+          prompt: workPrompt({ task: t, runObjective: run.objective, parentObjective: parent?.kind === 'orchestrate' ? parent.objective : undefined, deps, workspace: cwd, originalWorkspace: run.workspace, canDelegate, reportPath: '', headStart: this.headStart(s, t) }),
           system: SYSTEM_WORKER,
           depCount: deps.length,
         };
@@ -1090,27 +1226,45 @@ export class Engine {
    * A provider's usage limit is exhausted. Re-queue the task without spending a
    * retry, pause the run (running agents finish) and auto-resume at the reset.
    */
+  /**
+   * A provider hit its usage limit. Mark it exhausted until the reset (the
+   * router then skips it) and put the task back in the queue: it re-routes to
+   * a provider with quota left, or waits for the earliest reset (with free
+   * pre-work meanwhile). Nothing is paused and no retry is spent.
+   */
   private onUsageLimit(runId: string, taskId: string, agentId: string, error: string) {
     const s = this.state(runId);
     const t = s.tasks[taskId];
-    const a = s.agents[agentId];
-    if (t && !isTerminal(t)) this.emit(runId, { type: 'task.status', taskId, status: 'ready', reason: `waiting for ${a?.provider ?? 'provider'} usage limit to reset` });
+    const provider = s.agents[agentId]?.provider ?? 'provider';
     const resets = Object.values(s.quotas)
-      .filter((q) => q.provider === a?.provider && q.status === 'rejected' && q.resetsAt && q.resetsAt > Date.now())
+      .filter((q) => q.provider === provider && q.status === 'rejected' && q.window !== 'usage_limit' && q.resetsAt && q.resetsAt > Date.now())
       .map((q) => q.resetsAt!);
     const hinted = retryAfterMs(error);
-    // Unknown reset time: probe again in 30 minutes (a still-limited agent fails fast and re-pauses).
-    const resumeAt = (resets.length ? Math.max(...resets) : hinted ? Date.now() + hinted : Date.now() + 30 * 60_000) + 60_000;
-    if (s.run.status === 'running' || s.run.status === 'planning') {
-      const when = new Date(resumeAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-      this.emit(runId, { type: 'chat.message', messageId: id('msg'), from: 'system', text: `${a?.provider ?? 'Provider'} usage limit reached (${error.slice(0, 160)}). Run paused; it will auto-resume at ${when}, or press Resume to try sooner.` });
-      this.emit(runId, { type: 'run.status', status: 'paused', reason: `${a?.provider ?? 'provider'} usage limit; auto-resume at ${when}`, resumeAt });
-      this.armAutoResume(runId, resumeAt);
-    } else if (s.run.status === 'paused' && s.run.resumeAt && resumeAt > s.run.resumeAt + 60_000) {
-      // Already paused for another limit: wait for the later reset.
-      this.emit(runId, { type: 'run.status', status: 'paused', reason: `usage limits (${a?.provider ?? 'provider'} latest); auto-resume at ${new Date(resumeAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`, resumeAt });
-      this.armAutoResume(runId, resumeAt);
-    }
+    // Unknown reset time: probe again in 30 minutes.
+    const resetAt = (resets.length ? Math.max(...resets) : hinted ? Date.now() + hinted : Date.now() + 30 * 60_000) + 60_000;
+    this.emit(runId, { type: 'quota', provider, window: 'usage_limit', utilization: 1, resetsAt: resetAt, status: 'rejected' });
+    if (t && !isTerminal(t)) this.emit(runId, { type: 'task.status', taskId, status: 'ready', reason: `${provider} usage limit: re-routing` });
+    const when = new Date(resetAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    this.emit(runId, { type: 'chat.message', messageId: id('msg'), from: 'system', text: `${provider} usage limit reached (${error.slice(0, 160)}). Its work moves to other models until ${when}; tasks only wait if no capable model has quota left.` }, { dedupeKey: `limit:${provider}:${Math.round(resetAt / 600_000)}` });
+    this.armWake(runId, resetAt);
+    this.scheduleTick(runId);
+  }
+
+  /** Quota windows currently marked exhausted (limit hit, reset still ahead). */
+  private exhausted(s: RunState) {
+    return Object.values(s.quotas).filter((q) => (q.utilization ?? 0) > 0.95 && q.resetsAt && q.resetsAt > Date.now());
+  }
+
+  private armWake(runId: string, at: number) {
+    const cur = this.wakeTimers.get(runId);
+    if (cur && cur.at <= at && cur.at > Date.now()) return;
+    if (cur) clearTimeout(cur.timer);
+    const timer = setTimeout(() => {
+      this.wakeTimers.delete(runId);
+      this.scheduleTick(runId);
+    }, Math.min(Math.max(0, at - Date.now()) + 1000, 2 ** 31 - 1));
+    timer.unref?.();
+    this.wakeTimers.set(runId, { at, timer });
   }
 
   private onAgentFailure(runId: string, taskId: string, agentId: string, error: string, cls: ErrorClass | 'infra') {
@@ -1118,6 +1272,12 @@ export class Engine {
     const t = s.tasks[taskId];
     const a = s.agents[agentId];
     if (!t || isTerminal(t)) return;
+    if (t.preworkFor) {
+      // Pre-work is optional: one attempt, and a failure never affects the real task.
+      this.emit(runId, { type: 'task.status', taskId, status: 'failed', reason: `pre-work failed (${cls}): ${error.slice(0, 160)}` });
+      this.scheduleTick(runId);
+      return;
+    }
     const lim = s.run.config.limits;
     if (cls === 'infra') {
       // Not the model's fault: no perf record, no exclusion.
@@ -1372,14 +1532,14 @@ export class Engine {
     const final = s.run.finalArtifactId ? s.artifacts[s.run.finalArtifactId] : undefined;
     const asks = done.filter((t) => t.mode === 'replan').map((t) => t.objective.slice(0, 300));
     const results = done
-      .filter((t) => (t.kind === 'work' || t.kind === 'orchestrate') && t.status === 'completed')
+      .filter((t) => (t.kind === 'work' || t.kind === 'orchestrate') && t.status === 'completed' && !t.preworkFor)
       .slice(-25)
       .map((t) => {
         const report = t.artifactIds.map((a) => s.artifacts[a]).filter((a) => a?.kind === 'report').at(-1);
         const files = (t.outputs ?? []).slice(0, 4).map((o) => o.rel);
         return `- ${t.title}${t.verified ? ' (verified)' : ''}: ${(t.resultSummary ?? '').replace(/\s+/g, ' ').slice(0, 220)}${report ? ` [report: ${report.path}]` : ''}${files.length ? ` [files: ${files.join(', ')}]` : ''}`;
       });
-    const failed = done.filter((t) => t.kind === 'work' && t.status !== 'completed').map((t) => `- ${t.title}: ${t.status}${t.statusReason ? ` (${t.statusReason.slice(0, 120)})` : ''}`);
+    const failed = done.filter((t) => t.kind === 'work' && t.status !== 'completed' && !t.preworkFor).map((t) => `- ${t.title}: ${t.status}${t.statusReason ? ` (${t.statusReason.slice(0, 120)})` : ''}`);
     const entry = [
       `## Mission ${chapter}: ${(asks.at(-1) ?? s.run.objective).replace(/\s+/g, ' ').slice(0, 300)}`,
       root.resultTldr ? `TL;DR:\n${root.resultTldr.slice(0, 1500)}` : `Summary: ${(root.resultSummary ?? '').slice(0, 1500)}`,

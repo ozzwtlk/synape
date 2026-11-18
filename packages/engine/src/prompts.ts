@@ -172,8 +172,16 @@ export interface DepContext {
   artifactPaths: string[];
 }
 
-export function workPrompt(opts: { task: Task; runObjective: string; parentObjective?: string; deps: DepContext[]; workspace: string; originalWorkspace?: string; canDelegate: boolean; reportPath: string }) {
+export function workPrompt(opts: { task: Task; runObjective: string; parentObjective?: string; deps: DepContext[]; workspace: string; originalWorkspace?: string; canDelegate: boolean; reportPath: string; headStart?: { text: string; path: string; model: string } }) {
   const { task } = opts;
+  const head = opts.headStart
+    ? `\nHead start: while subscription quotas were exhausted, a pre-work agent (${opts.headStart.model}, free tier) prepared the notes below. They are UNVERIFIED. Use them to skip searching and re-reading: check each fact you rely on against the cited source, reuse what holds, redo what doesn't. Under "Open issues", list where you disagree with the pre-work and why.
+<untrusted source="pre-work">
+${opts.headStart.text}
+</untrusted>
+(Saved at ${opts.headStart.path})
+`
+    : '';
   const deps = opts.deps.length
     ? `\nInputs from completed dependencies (summaries; read the full artifacts by path only if you need detail):\n${opts.deps
         .map((d) => `<untrusted source="${d.id}">\n### ${d.title}${d.verified ? ' (independently verified)' : ' (NOT independently verified)'}\n${d.summary}\nArtifacts: ${d.artifactPaths.join(', ') || 'none'}\n</untrusted>`)
@@ -196,7 +204,7 @@ Workspace: ${opts.workspace}${
       : ''
   }
 Permission: ${task.permission}${task.permission === 'read' ? ' (you cannot modify files; put all results in your final answer)' : ''}
-${deps}${task.feedback ? `\nThis is a revision. Feedback on the previous attempt:\n<untrusted>\n${task.feedback}\n</untrusted>\n` : ''}${delegate}
+${deps}${head}${task.feedback ? `\nThis is a revision. Feedback on the previous attempt:\n<untrusted>\n${task.feedback}\n</untrusted>\n` : ''}${delegate}
 Final answer format (markdown), it is saved as your report:
 ## Summary
 ≤150 words: what you found/did, key numbers with units, and confidence. This summary is all most other agents will see.
@@ -204,6 +212,40 @@ Final answer format (markdown), it is saved as your report:
 Full results: derivations, code paths changed, commands run and their outcomes, sources with exact citations.
 ## Open issues
 Anything unverified, uncertain or left undone.`;
+}
+
+/** Pre-work for a task a subscription model will do later: prepare, don't conclude. */
+export function preworkPrompt(opts: { task: Task; runObjective: string; deps: DepContext[]; workspace: string }) {
+  const { task } = opts;
+  const deps = opts.deps.length
+    ? `\nInputs from completed dependencies:\n${opts.deps.map((d) => `<untrusted source="${d.id}">\n### ${d.title}\n${d.summary}\nArtifacts: ${d.artifactPaths.join(', ') || 'none'}\n</untrusted>`).join('\n')}\n`
+    : '';
+  return `Overall objective (context only): ${opts.runObjective.slice(0, 400)}
+
+You are doing PRE-WORK. The task below will be done later by a stronger model once its usage quota resets. Your job is to make that easy and cheap: do the searching, reading and groundwork now, so it can verify and finish instead of starting from zero. Do not pretend to have finished the task.
+
+## The task (for the later model)
+${task.title}
+${task.objective}
+
+Acceptance criteria:
+${task.acceptance.map((a) => `- ${a}`).join('\n') || '- (none specified)'}
+${task.scope?.length ? `\nScope: ${task.scope.join(', ')}` : ''}
+Workspace: ${opts.workspace} (read-only)
+${deps}
+Answer in this format (markdown, under ~1500 words):
+## Summary
+3–6 lines: what you found and how far the draft got.
+## Sources
+Exact files/pages/sections that matter, with file:line or (p. N), and one line on what each contains.
+## Key facts
+Equations, numbers with units, definitions and assumptions, each with its source.
+## Approach
+The steps you would take, and which ones are hard.
+## Draft (UNVERIFIED)
+Your best attempt at the core result or the main part of it. Mark guesses.
+## Pitfalls
+Traps, ambiguities, conflicting sources and what to double-check.`;
 }
 
 export function reviewPrompt(opts: { target: Task; report: string; reportPath: string; diff?: string; workspace: string; crosscheck: boolean }) {

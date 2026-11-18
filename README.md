@@ -147,6 +147,35 @@ pnpm synape local status
 
 The server log is at `~/.local/share/synape/local-llm.log`. You can switch the model off in *Fleet*, or pin any node to it from the Inspector.
 
+## When quotas run out
+
+**Failover.** When a provider reports its usage limit, Synape marks it exhausted until the reset time and moves its work to the remaining models. Nothing pauses and no retry is spent. A task waits only if no capable model has quota left. It starts automatically at the reset, or sooner when you press *Resume*, which also retries the exhausted providers.
+
+**Pre-work on free models (optional).** While a task waits that way, Synape can give it a head start using free frontier models behind a self-hosted [FreeLLMAPI](https://github.com/tashfeenahmed/freellmapi) gateway. FreeLLMAPI puts the free tiers of many providers behind one OpenAI-compatible endpoint, and Synape asks it for `auto:smart`, the strongest models available.
+
+The pre-work agent is read-only. It returns:
+
+- the relevant sources, with file:line or page
+- the key facts
+- an approach and an **unverified** draft
+- pitfalls
+
+When quota returns, the subscription model gets these notes in its prompt. It checks them against the sources, reuses what holds and lists where it disagrees. That saves the searching and re-reading tokens and adds an independent second attempt. Pre-work never replaces a task, and it never counts against agent limits or token budgets.
+
+Setup:
+
+```sh
+curl -fsSL https://freellmapi.co/install.sh | bash   # or: docker compose, see its README
+```
+
+1. Add provider keys (Groq, Cerebras, OpenRouter, Google…) in its dashboard.
+2. Copy its unified `freellmapi-…` key.
+3. Paste the key in **Fleet → Pre-work on free models**. The default gateway URL is `http://127.0.0.1:3001`.
+
+Environment overrides: `SYNAPE_FREELLM_URL`, `SYNAPE_FREELLM_KEY`, `SYNAPE_FREELLM_MODEL`, `SYNAPE_FREELLM_ENABLED=0`.
+
+Mind what you send: the prompts and the files these agents read go to third-party free tiers, which may log or train on them. Each upstream's terms apply. Switch pre-work off in Fleet, or exclude `freellm` from a mission, for work that must stay private.
+
 ## Configuration
 
 Each run is configured in the *New mission* dialog or through the API:

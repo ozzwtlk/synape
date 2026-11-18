@@ -128,6 +128,23 @@ export const BUILTIN_MODELS: Omit<ModelProfile, 'available'>[] = [
     ruPer1kTokens: 0.08,
     latencyFactor: 1.4,
   },
+  {
+    // Free frontier models behind a self-hosted FreeLLMAPI gateway ("auto:smart"
+    // ranks the strongest enabled ones: DeepSeek, Kimi, GLM, Gemini, Qwen…).
+    // Quality and capacity vary by the hour and prompts go to third-party free
+    // tiers, so it is used only for pre-work while subscriptions are exhausted.
+    id: 'freellm:auto',
+    provider: 'freellm',
+    model: 'auto:smart',
+    label: 'Free frontier (FreeLLMAPI)',
+    billing: 'free',
+    tier: 2,
+    contextWindow: 128_000,
+    skill: { extraction: 0.8, analysis: 0.68, coding: 0.68, reasoning: 0.6, writing: 0.68, research: 0.65, review: 0.6, planning: 0.6 },
+    ruPer1kTokens: 0.05,
+    latencyFactor: 1.5,
+    preworkOnly: true,
+  },
 ];
 
 /**

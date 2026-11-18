@@ -3,7 +3,7 @@
 // the same reducer.
 
 export type ProviderId = 'claude-code' | 'codex' | (string & {});
-export type BillingKind = 'subscription' | 'api' | 'local';
+export type BillingKind = 'subscription' | 'api' | 'local' | 'free';
 
 export type TaskKind =
   | 'plan' // orchestrator decomposes an objective into tasks
@@ -91,7 +91,7 @@ export const DEFAULT_LIMITS: Limits = {
   maxRetries: 2,
   maxTasks: 40,
   taskTimeoutMs: 30 * 60_000,
-  providerConcurrency: { 'claude-code': 4, codex: 3, local: 1 },
+  providerConcurrency: { 'claude-code': 4, codex: 3, local: 1, freellm: 4 },
 };
 
 export const DEFAULT_CONFIG: RunConfig = {
@@ -132,6 +132,8 @@ export interface ModelProfile {
   defaultEnabled?: boolean;
   /** Turned off by the user (or by default); never routed to. */
   disabled?: boolean;
+  /** Only used for pre-work (head starts while subscriptions are out of quota) or when pinned. */
+  preworkOnly?: boolean;
 }
 
 export interface CostBreakdown {
@@ -204,6 +206,8 @@ export interface TaskSpec {
   scope?: string[];
   /** 'replan' marks a follow-up planning task that patches the live graph. */
   mode?: 'replan';
+  /** Pre-work: a free-model head start for this (quota-blocked) task. */
+  preworkFor?: string;
 }
 
 export interface Task extends TaskSpec {

@@ -150,7 +150,16 @@ export function startServer(opts: ServerOptions) {
       if (path === '/api/providers') {
         const quotas: Record<string, unknown> = {};
         for (const run of engine.store.listRuns().slice(0, 10)) for (const [k, q] of Object.entries(engine.state(run.id).quotas)) if (!quotas[k] || (quotas[k] as any).observedAt < q.observedAt) quotas[k] = q;
-        return json(res, 200, { providers: [...engine.providers.values()], models: engine.models, quotas, perf: engine.store.perfTable() });
+        return json(res, 200, { providers: [...engine.providers.values()], models: engine.models, quotas, perf: engine.store.perfTable(), freellm: engine.freeSettings() });
+      }
+      if (path === '/api/freellm' && method === 'POST') {
+        const b = await readBody(req);
+        try {
+          await engine.setFreeSettings({ url: b.url === undefined ? undefined : String(b.url), apiKey: b.apiKey ? String(b.apiKey) : undefined, model: b.model ? String(b.model) : undefined, enabled: b.enabled === undefined ? undefined : !!b.enabled });
+        } catch (e) {
+          return json(res, 400, { error: (e as Error).message });
+        }
+        return json(res, 200, engine.freeSettings());
       }
       if (path === '/api/providers/refresh' && method === 'POST') return json(res, 200, await engine.detectProviders());
       if (path === '/api/runs' && method === 'GET') return json(res, 200, engine.store.listRuns());

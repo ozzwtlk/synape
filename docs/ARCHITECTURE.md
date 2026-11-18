@@ -161,3 +161,21 @@ A run can hold several missions. When a mission completes (its final synthesis i
 A follow-up then starts a new chapter. The replan prompt contains the memory and the live tasks only, never the old graph. The orchestrator opens a listed report only when the instruction needs the detail. The chapter's synthesis starts fresh, and task and agent limits count the current chapter. Retrying an archived task brings it back into the live graph.
 
 The orchestrator's plan items carry a `model` field. It is empty for automatic routing; a model id relays an explicit user request ("use Qwen for the PDFs") and becomes a pin. Runs created with a provider allowlist (`providers`) always admit the local model, because it costs no quota and may postdate the run. New runs record `excludedProviders` instead.
+
+## Usage limits and pre-work
+
+A `quota`-class agent failure is not a failed attempt. The engine:
+
+1. emits `quota {window: 'usage_limit', utilization: 1, status: 'rejected', resetsAt}`. The router then rejects that provider, including models pinned to it and the resume-same-session shortcut.
+2. re-queues the task, which re-routes to a provider with quota left
+3. arms a wake timer for the reset
+
+If routing fails only because of exhausted quota (`quotaWait`: the task routes when quotas are ignored), the task stays `ready` with a *waiting* reason instead of failing.
+
+Waiting `work` tasks get one pre-work task each (`preworkFor`, at most 6 live per run). A pre-work task:
+
+- is pinned to the `preworkOnly` model `freellm:auto` (FreeLLMAPI, OpenAI-compatible, driven by the same agent loop as the local model)
+- runs read-only, with no verification and a single attempt
+- is exempt from the agent cap and the token budget
+
+When quota returns, the real task waits up to 15 minutes for running pre-work. Its prompt, or the continuation message of a resumed session, then includes the pre-work report as untrusted, unverified notes. The worker must check them against the sources and list where it disagrees. Unfinished pre-work is cancelled when its task settles, and pre-work is left out of mission memory.

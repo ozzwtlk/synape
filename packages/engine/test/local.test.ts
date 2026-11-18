@@ -6,16 +6,22 @@ import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { LocalAdapter, compact, confine, parseJson } from '../src/adapters/local.ts';
 import { LocalRuntime, findModel, serverArgs, type LocalConfig } from '../src/local.ts';
+import { FreeLLMAdapter, type FreeConfig } from '../src/adapters/free.ts';
 import { classifyCompute } from '@synape/core';
 import type { AdapterEvent, AgentRunSpec } from '../src/adapters/types.ts';
 
 /** A scripted stand-in for llama-server's OpenAI-compatible streaming API. */
 type Reply = { content?: string; reasoning?: string; tool?: { name: string; args: object } };
 const requests: any[] = [];
+const authSeen: (string | undefined)[] = [];
 let script: (n: number, body: any) => Reply = () => ({ content: 'ok' });
 const fake = createServer((req, res) => {
   if (req.url === '/health') return res.end('{"status":"ok"}');
-  if (req.url === '/v1/models') return res.end('{"data":[{"id":"local"}]}');
+  if (req.url?.startsWith('/v1/models')) {
+    if (req.url.includes('available=true') && req.headers.authorization !== 'Bearer freellmapi-test') return (res.statusCode = 401), res.end('{}');
+    return res.end('{"data":[{"id":"local","execution_status":"ready"},{"id":"other","execution_status":"needsKey"}]}');
+  }
+  if (req.url === '/v1/chat/completions') authSeen.push(req.headers.authorization);
   if (req.url === '/props') return res.end(JSON.stringify({ model_path: '/m/Fake-35B-A3B.gguf', default_generation_settings: { n_ctx: 4096 } }));
   let raw = '';
   req.on('data', (c) => (raw += c));
@@ -23,7 +29,7 @@ const fake = createServer((req, res) => {
     const body = JSON.parse(raw);
     requests.push(body);
     const r = script(requests.length, body);
-    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.writeHead(200, { 'content-type': 'text/event-stream', 'x-routed-via': 'groq/llama-4-maverick' });
     const send = (d: object) => res.write(`data: ${JSON.stringify(d)}\n\n`);
     if (r.reasoning) send({ choices: [{ delta: { reasoning_content: r.reasoning } }] });
     if (r.content) for (const part of r.content.match(/.{1,7}/gs) ?? []) send({ choices: [{ delta: { content: part } }] });
@@ -124,6 +130,30 @@ describe('local provider', () => {
     expect((await down.detect()).available).toBe(false);
     const ev = await collect(down.run(spec()));
     expect(ev.at(-1)).toMatchObject({ kind: 'final', ok: false, errorClass: 'provider' });
+  });
+});
+
+describe('free models (FreeLLMAPI gateway)', () => {
+  const fc: FreeConfig = { url, apiKey: 'freellmapi-test', model: 'auto:smart', enabled: true, ctx: 8000 };
+
+  it('detects the gateway, counting only ready models, and needs a valid key', async () => {
+    expect(await new FreeLLMAdapter(() => fc).detect()).toMatchObject({ available: true, billing: 'free', version: '1 free models ready' });
+    expect((await new FreeLLMAdapter(() => ({ ...fc, apiKey: 'wrong' })).detect()).reason).toMatch(/rejected the key/);
+    expect((await new FreeLLMAdapter(() => ({ ...fc, apiKey: undefined })).detect()).reason).toMatch(/no FreeLLMAPI key/);
+    expect((await new FreeLLMAdapter(() => ({ ...fc, enabled: false })).detect()).available).toBe(false);
+  });
+
+  it('runs the agent loop with the gateway key and model, read-only tools, and reports the upstream', async () => {
+    requests.length = 0;
+    authSeen.length = 0;
+    script = (n) => (n === 1 ? { tool: { name: 'read_file', args: { path: 'notes.txt' } } } : { content: '## Summary\nfound 42' });
+    const ev = await collect(new FreeLLMAdapter(() => fc).run(spec({ model: 'auto:smart' })));
+    expect(ev.find((e) => e.kind === 'final')).toMatchObject({ ok: true, text: '## Summary\nfound 42' });
+    expect(requests[0].model).toBe('auto:smart');
+    expect(authSeen.every((a) => a === 'Bearer freellmapi-test')).toBe(true);
+    expect(requests[0].messages[0].content).toMatch(/pre-work agent/);
+    expect(requests[0].tools.map((t: any) => t.function.name)).not.toContain('bash');
+    expect(ev.some((e) => e.kind === 'system' && e.text === 'served by groq/llama-4-maverick')).toBe(true);
   });
 });
 

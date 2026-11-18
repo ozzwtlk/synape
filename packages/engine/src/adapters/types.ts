@@ -40,7 +40,7 @@ export interface ProviderInfo {
   reason?: string;
   version?: string;
   auth?: string;
-  billing: 'subscription' | 'api' | 'local' | 'unknown';
+  billing: 'subscription' | 'api' | 'local' | 'free' | 'unknown';
 }
 
 export interface ProviderAdapter {
