@@ -399,7 +399,12 @@ export class Engine {
     } else if (ap.kind === 'budget') {
       if (approved) {
         const c = structuredClone(s.run.config);
-        if (c.budgets.maxTokens) c.budgets.maxTokens = Math.round(c.budgets.maxTokens * 1.5);
+        if ((ap.payload as { limit?: string } | undefined)?.limit === 'maxTotalAgents') {
+          // Headroom of half the limit beyond what is already spawned (runs from older versions may be far over).
+          const spawned = Object.values(s.agents).filter((a) => a.status !== 'interrupted' && !s.tasks[a.taskId]?.archived).length;
+          c.limits.maxTotalAgents = Math.ceil(Math.max(c.limits.maxTotalAgents * 1.5, spawned + c.limits.maxTotalAgents / 2));
+        }
+        else if (c.budgets.maxTokens) c.budgets.maxTokens = Math.round(c.budgets.maxTokens * 1.5);
         this.emit(runId, { type: 'run.config', config: c });
         this.emit(runId, { type: 'run.status', status: 'running', reason: 'budget raised by user' });
       }
@@ -598,9 +603,11 @@ export class Engine {
       if (activeAgents(s).length >= lim.maxConcurrentAgents) break;
       const totalAgents = Object.values(s.agents).filter((a) => a.status !== 'interrupted' && !s.tasks[a.taskId]?.archived).length;
       if (totalAgents >= lim.maxTotalAgents) {
-        this.emit(runId, { type: 'limit.hit', limit: 'maxTotalAgents', detail: `${totalAgents} agents spawned (max ${lim.maxTotalAgents})`, taskId: t.id }, { dedupeKey: `maxTotal:${t.id}` });
-        this.emit(runId, { type: 'task.status', taskId: t.id, status: 'failed', reason: 'agent spawn limit reached' });
-        continue;
+        // Like the token budget: pause and ask, rather than failing work that is ready to run.
+        this.emit(runId, { type: 'limit.hit', limit: 'maxTotalAgents', detail: `${totalAgents} agents spawned (max ${lim.maxTotalAgents})`, taskId: t.id }, { dedupeKey: `maxTotal:${lim.maxTotalAgents}` });
+        this.emit(runId, { type: 'run.status', status: 'paused', reason: `agent limit reached (${lim.maxTotalAgents})` });
+        this.emit(runId, { type: 'approval.requested', id: id('appr'), kind: 'budget', description: `Agent limit reached (${totalAgents} / ${lim.maxTotalAgents} agents this mission). Approve to raise it and continue.`, payload: { limit: 'maxTotalAgents' } }, { dedupeKey: `agents:${lim.maxTotalAgents}` });
+        return;
       }
       const perTask = countedAttempts(s, t) + Object.values(s.tasks).filter((x) => x.reviewOf === t.id).length;
       if (perTask >= lim.maxAgentsPerTask) {

@@ -390,6 +390,29 @@ describe('engine', () => {
   });
 });
 
+describe('agent limit', () => {
+  it('pauses and asks for approval instead of failing tasks; approving raises the limit and continues', async () => {
+    const { engine } = setup((spec) => (isPlan(spec) ? { structured: { summary: 'p', reply: 'ok', tasks: [plannedTask('x'), plannedTask('y'), plannedTask('z')] } } : isSynth(spec) ? { text: '## Summary\ns' } : { text: '## Summary\nok' }));
+    await engine.init();
+    const runId = engine.createRun({ objective: 'o', workspace: process.cwd(), config: { limits: { maxTotalAgents: 2, maxConcurrentAgents: 1 } as any } });
+    let s = await waitFor(engine, runId, (s) => s.run.status === 'paused');
+    expect(Object.values(s.tasks).some((t) => t.status === 'failed')).toBe(false);
+    const ap = Object.values(s.approvals).find((a) => a.status === 'pending')!;
+    expect(ap.description).toMatch(/Agent limit reached/);
+    engine.resolveApproval(runId, ap.id, true);
+    s = await waitFor(engine, runId, (s) => s.run.status !== 'running' && s.run.status !== 'planning');
+    // Approve again if it needed more headroom, until done.
+    for (let i = 0; i < 5 && s.run.status === 'paused'; i++) {
+      const next = Object.values(s.approvals).find((a) => a.status === 'pending');
+      if (!next) break;
+      engine.resolveApproval(runId, next.id, true);
+      s = await waitFor(engine, runId, (s) => s.run.status !== 'running' && s.run.status !== 'planning');
+    }
+    expect(s.run.status).toBe('completed');
+    expect(s.run.config.limits.maxTotalAgents).toBeGreaterThan(2);
+  });
+});
+
 describe('provider selection', () => {
   const LOCAL: Omit<ModelProfile, 'available'> = { id: 'local:default', provider: 'local', model: 'local', label: 'Local', billing: 'local', tier: 1, contextWindow: 100000, skill: { analysis: 0.7, planning: 0.7, writing: 0.7 }, ruPer1kTokens: 0.08, latencyFactor: 1 };
   function run(config: Record<string, unknown>) {
