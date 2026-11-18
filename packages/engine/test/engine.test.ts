@@ -224,7 +224,8 @@ describe('engine', () => {
     const FREE: Omit<ModelProfile, 'available'> = { id: 'freellm:auto', provider: 'freellm', model: 'auto:smart', label: 'Free', billing: 'free', tier: 2, contextWindow: 100000, skill: { analysis: 0.7 }, ruPer1kTokens: 0.05, latencyFactor: 1, preworkOnly: true };
     const engine = new Engine({ store: new EventStore(join(dir, 'db.sqlite')), adapters: [new ScriptedAdapter('a', script), new ScriptedAdapter('b', script), new ScriptedAdapter('freellm', script)], dataDir: dir, models: [...MODELS, FREE] });
     await engine.init();
-    const runId = engine.createRun({ objective: 'prework', workspace: process.cwd() });
+    // A run created before free models existed (legacy provider list) still gets pre-work.
+    const runId = engine.createRun({ objective: 'prework', workspace: process.cwd(), config: { providers: ['a', 'b'] } });
     let s = await waitFor(engine, runId, (s) => Object.values(s.tasks).some((t) => t.preworkFor && t.status === 'completed'));
     const hard = Object.values(s.tasks).find((t) => t.title === 'Task hard')!;
     expect(hard.status).toBe('ready');

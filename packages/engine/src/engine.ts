@@ -857,8 +857,10 @@ export class Engine {
     const c = s.run.config;
     let ps = [...this.providers.keys()];
     // Legacy allowlist: snapshot of what was available when the run was created.
-    // The local model is always admitted (no quota cost; it may postdate the run).
-    if (c.providers) ps = ps.filter((p) => c.providers!.includes(p) || p === 'local');
+    // Providers that cost no subscription quota (local model, free models) are
+    // always admitted: they may postdate the run. Exclusions still apply.
+    const quotaFree = (p: string) => p === 'local' || p === 'freellm' || ['local', 'free'].includes(this.providers.get(p)?.billing ?? '');
+    if (c.providers) ps = ps.filter((p) => c.providers!.includes(p) || quotaFree(p));
     return ps.filter((p) => !c.excludedProviders?.includes(p));
   }
 
@@ -1089,6 +1091,11 @@ export class Engine {
           break;
         case 'quota':
           this.emit(runId, { type: 'quota', provider: agent.provider, window: ev.window, utilization: ev.utilization, resetsAt: ev.resetsAt, status: ev.status });
+          if (ev.status === 'rejected' && ev.resetsAt) {
+            const when = new Date(ev.resetsAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            this.emit(runId, { type: 'chat.message', messageId: id('msg'), from: 'system', text: `${agent.provider} ${ev.window.replace('_', '-')} limit reached (resets ${when}). Its work moves to other models; tasks only wait if no capable model has quota left.` }, { dedupeKey: `limit:${agent.provider}:${Math.round(ev.resetsAt / 600_000)}` });
+            this.armWake(runId, ev.resetsAt + 60_000);
+          }
           break;
         case 'final':
           final = ev;
