@@ -123,7 +123,7 @@ export const BUILTIN_MODELS: Omit<ModelProfile, 'available'>[] = [
     label: 'Local · Qwen3.6-35B-A3B',
     billing: 'local',
     tier: 1,
-    contextWindow: 262_144,
+    contextWindow: 163_840, // default served context (see engine/src/local.ts)
     skill: { extraction: 0.8, analysis: 0.55, coding: 0.55, reasoning: 0.42, writing: 0.55, research: 0.5, review: 0.42, planning: 0.38 },
     ruPer1kTokens: 0.08,
     latencyFactor: 1.4,

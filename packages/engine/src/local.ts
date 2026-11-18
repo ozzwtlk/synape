@@ -11,8 +11,8 @@ import { basename, join } from 'node:path';
  * Defaults target one 16 GB consumer GPU + 32 GB RAM running a hybrid-
  * attention MoE (Qwen3.6-35B-A3B): `--fit` keeps attention, shared experts
  * and the KV cache on the GPU and streams the remaining routed experts from
- * RAM; q8 KV and the model's own MTP head (speculative decoding) make the
- * full 262k context practical. Every setting can be overridden.
+ * RAM; q8 KV and the model's own MTP head (speculative decoding) keep long
+ * contexts cheap. Every setting can be overridden.
  */
 export interface LocalConfig {
   /** OpenAI-compatible base URL (no trailing /v1). */
@@ -30,6 +30,14 @@ export interface LocalConfig {
 }
 
 const HOME = homedir();
+/**
+ * 160k, not the model's native 262k: on an RX 6800 XT (Vulkan) a prompt past
+ * ~200k tokens makes single GPU jobs outlast amdgpu's default compute timeout
+ * (ring timeout → vk DeviceLost), measured at 199k and 207k. Raise
+ * amdgpu.lockup_timeout to use the full window.
+ */
+export const DEFAULT_CTX = 163_840;
+
 export const MODELS_DIR = process.env.SYNAPE_MODELS_DIR ?? join(HOME, '.local', 'share', 'llm', 'models');
 
 /** Newest llama.cpp release unpacked under ~/.local/opt, else PATH. */
@@ -74,7 +82,7 @@ export function localConfig(dataDir: string): LocalConfig {
     url: (env.SYNAPE_LOCAL_URL ?? s.url ?? 'http://127.0.0.1:8091').replace(/\/+$/, '').replace(/\/v1$/, ''),
     bin: s.bin ?? findLlamaServer(),
     model: s.model ?? findModel(),
-    ctx: Number(env.SYNAPE_LOCAL_CTX ?? s.ctx ?? 262_144),
+    ctx: Number(env.SYNAPE_LOCAL_CTX ?? s.ctx ?? DEFAULT_CTX),
     idleMinutes: Number(env.SYNAPE_LOCAL_IDLE_MIN ?? s.idleMinutes ?? 20),
     autostart: (env.SYNAPE_LOCAL_AUTOSTART ?? String(s.autostart ?? true)) !== 'false',
     vramMarginMiB: Number(s.vramMarginMiB ?? 768),
@@ -100,7 +108,9 @@ export function serverArgs(c: LocalConfig, safe = false): string[] {
     '-fa', 'on',
     '-ctk', 'q8_0', '-ctv', 'q8_0', // half the KV memory, ~lossless
     '--fit', 'on', '--fit-target', String(c.vramMarginMiB), '--fit-ctx', String(c.ctx),
-    '-b', '2048', '-ub', '1024', // faster prompt processing for long PDFs
+    // Prompt batch: 2048 is ~1.5x faster on long PDFs than 1024. Larger batches make a
+    // single GPU job at 100k+ context outlast amdgpu's compute timeout (device lost).
+    '-b', '2048', '-ub', '2048',
     '--no-mmproj', // text only: the vision tower would cost ~1 GB VRAM
     // Qwen's recommended sampling for thinking mode.
     '--temp', '0.6', '--top-p', '0.95', '--top-k', '20', '--min-p', '0',
@@ -205,13 +215,13 @@ export class LocalRuntime {
         this.lastError = String(e);
         done(false);
       });
-      child.on('exit', (code) => {
-        if (this.child === child) this.child = undefined;
+      child.on('exit', (code, sig) => {
+        const wasCurrent = this.child === child;
+        if (wasCurrent) this.child = undefined;
         log?.end();
-        if (!settled) {
-          this.lastError = `exited with ${code}: ${tail.split('\n').filter((l) => /error|fail|invalid|unknown/i.test(l)).slice(-3).join(' | ') || tail.slice(-300)}`;
-          done(false);
-        }
+        if (/DeviceLost/i.test(tail)) this.lastError = 'GPU job timed out (vk DeviceLost): prompt too long for the batch size; lower -ub in settings.local.extraArgs or raise amdgpu.lockup_timeout';
+        else if (!settled || (wasCurrent && sig !== 'SIGTERM')) this.lastError = `exited with ${code ?? sig}: ${tail.split('\n').filter((l) => /error|fail|invalid|unknown/i.test(l)).slice(-3).join(' | ') || tail.slice(-300)}`;
+        if (!settled) done(false);
       });
       const t0 = Date.now();
       const poll = setInterval(async () => {

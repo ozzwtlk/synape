@@ -16,7 +16,7 @@ Synape was built for scientific work, where a result is only worth something onc
 - **Paper & figures.** A built-in PDF viewer for the manuscript, plus a provenance panel. It shows every figure the agents produced, grouped by the node that produced it (with model and verification status), and which figures `main.tex` actually `\includegraphics`, following `\input`/`\include`. Figures are snapshotted when an agent finishes, so later edits can't rewrite provenance.
 - **Outputs per node.** Each node's *Outputs* tab lists exactly the files it wrote. In git workspaces this is checked against git, so a fresh worktree checkout isn't mistaken for work.
 - **A short answer at the end.** The final synthesis leads with a TL;DR (the result with its uncertainty, what is verified, the biggest open issue). The *Summary* panel opens when a run finishes, with verification counts, failures, deliverables and per-workstream one-liners.
-- **A local model for the bulky work.** Reading and digesting PDFs, extraction and summaries can run on your own GPU through llama.cpp (default: Qwen3.6-35B-A3B, 262k context), costing no subscription quota. Its results are still reviewed by a cloud model of another family.
+- **A local model for the bulky work.** Reading and digesting PDFs, extraction and summaries can run on your own GPU through llama.cpp (default: Qwen3.6-35B-A3B, 160k context), costing no subscription quota. Its results are still reviewed by a cloud model of another family.
 - **Runs that survive usage limits.** When a subscription window is exhausted, the run pauses and resumes automatically at the reset time, without spending retries. Models your plan doesn't include can be switched off, and any node can be pinned to a specific model.
 
 ## What it does
@@ -99,14 +99,22 @@ Synape can run agents on a local model served by [llama.cpp](https://github.com/
 
 **Tuned for one 16 GB GPU and 32 GB of RAM.** The adapter launches llama-server with:
 - `--fit on`: attention, shared experts and the KV cache stay in VRAM, and the remaining routed experts are served from RAM.
-- `-c 262144 -np 1`: the full context window, in one slot.
-- Flash attention and a q8 KV cache. Only 10 of the model's 40 layers keep a KV cache, so the full window costs about 2.7 GB.
+- `-c 163840 -np 1`: a 160k-token context in one slot. See *Measured* below for why it isn't the native 262k.
+- Flash attention and a q8 KV cache. Only 10 of the model's 40 layers keep a KV cache, so 160k costs about 1.7 GB.
+- `-b 2048 -ub 2048` prompt batches: about 1.5× faster on long PDFs than 1024. Larger batches crash, see below.
 - MTP speculative decoding (`--spec-type draft-mtp`). If that fails, it retries without it.
-- Large prompt batches, for long PDFs.
 - Text only (no vision projector), and bound to `127.0.0.1`.
 - Qwen's recommended sampling.
 
 `pnpm synape local args` prints the exact command.
+
+**Measured on an RX 6800 XT (Vulkan) with 32 GB of RAM:**
+- The model loads in about 22 s.
+- Generation runs at about 50 tokens/s, with 79% of MTP drafts accepted. At 109k tokens of context it is still 39 tokens/s.
+- Prompt processing runs at 550 tokens/s at 33k tokens and averages about 350 tokens/s over 109k tokens. A 30-page paper (about 25k tokens) is read in under a minute.
+- A planted fact was found correctly at 33k and at 109k tokens.
+
+**Why 160k and not 262k.** Past about 200k tokens, single GPU jobs outlast the amdgpu driver's default compute timeout. The kernel resets the compute ring, and llama.cpp aborts with `vk DeviceLost`. This happened at 199k and 207k tokens, and at batch 8192 even below 109k. The reset is recoverable: the display keeps running. To try the full window, raise the timeout with the kernel parameter `amdgpu.lockup_timeout=10000,60000` (graphics, compute in ms), reboot, and set `ctx` to 262144. That configuration is untested here.
 
 **Tools and skills.** The local agent has its own tool loop, gated by the same permission levels as the CLI agents:
 - `list_dir`, `read_file`, `grep` and `pdf_text` (paged, via poppler) when reading;
@@ -131,7 +139,7 @@ pnpm synape local status
 | `url` / `SYNAPE_LOCAL_URL` | `http://127.0.0.1:8091` | Use an already running server instead |
 | `bin` / `SYNAPE_LLAMA_SERVER` | newest `~/.local/opt/llama.cpp*/llama-server`, else PATH | |
 | `model` / `SYNAPE_LOCAL_MODEL` | best `.gguf` in `~/.local/share/llm/models` | |
-| `ctx` / `SYNAPE_LOCAL_CTX` | 262144 | |
+| `ctx` / `SYNAPE_LOCAL_CTX` | 163840 | |
 | `idleMinutes` / `SYNAPE_LOCAL_IDLE_MIN` | 20 | 0 keeps it loaded |
 | `autostart` / `SYNAPE_LOCAL_AUTOSTART` | true | |
 | `vramMarginMiB`, `extraArgs` | 768, `[]` | VRAM left for the desktop; extra llama-server flags |

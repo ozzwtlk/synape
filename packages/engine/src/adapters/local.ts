@@ -2,6 +2,8 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { randomBytes } from 'node:crypto';
+import { request as httpRequest, type IncomingMessage } from 'node:http';
+import { request as httpsRequest } from 'node:https';
 import { permissionRank, type Usage } from '@synape/core';
 import { clip, type AdapterEvent, type AgentRunSpec, type ErrorClass, type ProviderAdapter, type ProviderInfo } from './types.ts';
 import { execText } from './proc.ts';
@@ -115,7 +117,8 @@ export class LocalAdapter implements ProviderAdapter {
           res = await complete(cfg.url, { messages, tools: tools.map((t) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.parameters } })), max_tokens: 16_384 }, signal);
         } catch (e) {
           save();
-          yield { kind: 'final', ok: false, text: finalText, error: `local model request failed: ${(e as Error).message}`, errorClass: signal.aborted ? why() : /context|too long|exceed/i.test(String(e)) ? 'task' : 'provider' };
+          const crash = !(await this.runtime.status()).up && this.runtime.lastError ? ` (server: ${this.runtime.lastError})` : '';
+          yield { kind: 'final', ok: false, text: finalText, error: `local model request failed: ${(e as Error).message}${crash}`, errorClass: signal.aborted ? why() : /context|too long|exceed/i.test(String(e)) ? 'task' : 'provider' };
           return;
         }
         addUsage(usage, res, started);
@@ -190,20 +193,37 @@ interface Completion {
   completionTokens: number;
 }
 
-/** Streaming chat completion (streaming keeps long generations alive through proxies and lets us abort). */
-async function complete(base: string, body: Record<string, unknown>, signal: AbortSignal): Promise<Completion> {
-  const r = await fetch(`${base}/v1/chat/completions`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ model: 'local', stream: true, stream_options: { include_usage: true }, ...body }),
-    signal,
+/**
+ * Streaming chat completion over node:http, not fetch: undici's fetch gives up
+ * after 5 minutes without response headers, and llama-server only answers once
+ * it has processed the whole prompt (a 200k-token PDF dump takes longer).
+ */
+function openStream(base: string, body: Record<string, unknown>, signal: AbortSignal): Promise<IncomingMessage> {
+  const u = new URL(`${base}/v1/chat/completions`);
+  const payload = JSON.stringify({ model: 'local', stream: true, stream_options: { include_usage: true }, ...body });
+  return new Promise((ok, fail) => {
+    const req = (u.protocol === 'https:' ? httpsRequest : httpRequest)(u, { method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) }, signal }, (res) => {
+      if ((res.statusCode ?? 500) >= 400) {
+        let t = '';
+        res.on('data', (c) => (t += c));
+        res.on('end', () => fail(new Error(`HTTP ${res.statusCode}: ${clip(t, 400)}`)));
+        res.on('error', fail);
+        return;
+      }
+      ok(res);
+    });
+    req.on('error', fail);
+    req.end(payload);
   });
-  if (!r.ok || !r.body) throw new Error(`HTTP ${r.status}: ${clip(await r.text().catch(() => ''), 400)}`);
+}
+
+async function complete(base: string, body: Record<string, unknown>, signal: AbortSignal): Promise<Completion> {
+  const res = await openStream(base, body, signal);
   const out: Completion = { content: '', reasoning: '', toolCalls: [], promptTokens: 0, cachedTokens: 0, completionTokens: 0 };
   const calls = new Map<number, ToolCall>();
   const dec = new TextDecoder();
   let buf = '';
-  for await (const chunk of r.body as unknown as AsyncIterable<Uint8Array>) {
+  for await (const chunk of res as AsyncIterable<Buffer>) {
     buf += dec.decode(chunk, { stream: true });
     let i: number;
     while ((i = buf.indexOf('\n')) >= 0) {
