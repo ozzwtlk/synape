@@ -79,6 +79,7 @@ export const api = {
   task: (id: string, taskId: string, action: 'cancel' | 'retry') => req(`/api/runs/${id}/tasks/${taskId}/${action}`, { method: 'POST', json: {} }),
   setTaskModel: (id: string, taskId: string, modelId: string | null) => req(`/api/runs/${id}/tasks/${taskId}/model`, { method: 'POST', json: { modelId } }),
   setModelEnabled: (modelId: string, enabled: boolean) => req('/api/models', { method: 'POST', json: { modelId, enabled } }),
+  resetQuota: (provider?: string) => req<{ cleared: number }>('/api/quota/reset', { method: 'POST', json: { provider } }),
   setFreeLLM: (p: { url?: string; apiKey?: string; model?: string; enabled?: boolean }) => req('/api/freellm', { method: 'POST', json: p }),
   setProviderWeight: (provider: string, weight: number) => req('/api/provider-weight', { method: 'POST', json: { provider, weight } }),
   approve: (id: string, approvalId: string, approved: boolean) => req(`/api/runs/${id}/approvals/${approvalId}`, { method: 'POST', json: { approved } }),

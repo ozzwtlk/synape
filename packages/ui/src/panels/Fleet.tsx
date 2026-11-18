@@ -28,6 +28,11 @@ export function Fleet({ providers, onClose, onRefresh }: { providers?: Providers
               <span className="grow" />
               <span className="mono faint">{p.available ? p.auth : p.reason}</span>
               <span className="chip">{p.billing}</span>
+              {p.billing === 'subscription' && (
+                <button className="btn sm ghost" title="Limit reset early (e.g. on the provider's website)? Mark this provider available again; the next request reports the real usage." onClick={async () => (await api.resetQuota(p.id), onRefresh())}>
+                  Reload quota
+                </button>
+              )}
               {p.billing !== 'local' && <WeightInput provider={p.id} value={providers.models.find((m) => m.provider === p.id)?.quotaWeight ?? 1} onSaved={onRefresh} />}
             </div>
           ))}

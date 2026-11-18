@@ -174,8 +174,12 @@ function ResourcePanel({ s, onClose }: { s: RunState; onClose: () => void }) {
       ))}
       {Object.values(s.quotas).length > 0 && (
         <>
-          <div className="eyebrow" style={{ margin: '12px 0 6px' }}>
-            Subscription windows (reported by provider)
+          <div className="row" style={{ margin: '12px 0 6px' }}>
+            <span className="eyebrow">Subscription windows (reported by provider)</span>
+            <span className="grow" />
+            <button className="btn sm ghost" title="Limit reset early (e.g. on the provider's website)? Mark all providers available again; the next request reports the real usage." onClick={() => void api.resetQuota()}>
+              Reload quota
+            </button>
           </div>
           {Object.values(s.quotas).map((q) => (
             <div key={q.provider + q.window} style={{ marginBottom: 6 }}>

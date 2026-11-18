@@ -234,7 +234,7 @@ describe('engine', () => {
     const pre = Object.values(s.tasks).find((t) => t.preworkFor === hard.id)!;
     expect(pre.pinnedModel).toBe('freellm:auto');
     expect(pre.permission).toBe('read');
-    expect(s.messages.some((m) => /Free frontier models are preparing a head start/.test(m.text))).toBe(true);
+    expect(s.messages.some((m) => /→ free models/.test(m.text))).toBe(true);
     // Free-model agents don't count against the agent limit or the token budget.
     expect(engine['missionTokens'](s)).toBeLessThan(Object.values(s.agents).reduce((n, a) => n + a.usage.inputTokens, 0));
     // Quota is back (user pressed Resume): the real task runs with the head start.
@@ -246,6 +246,41 @@ describe('engine', () => {
     // Only one pre-work per task, and it is not reported as a result of the mission.
     expect(Object.values(s.tasks).filter((t) => t.preworkFor)).toHaveLength(1);
     expect(s.run.memory).not.toMatch(/Pre-work:/);
+    await engine.shutdown();
+  });
+
+  it('hard work never drops to the local model while strong models are limited: it waits, Qwen does the groundwork, quota reload resumes it', async () => {
+    let limited = true;
+    const prompts: { model: string; prompt: string }[] = [];
+    const script: Script = (spec) => {
+      if (isPlan(spec)) return { structured: { summary: 'p', reply: 'ok', tasks: [plannedTask('big', { category: 'analysis', complexity: 5, criticality: 3 })] } };
+      if (isSynth(spec)) return { text: '## Summary\ns' };
+      prompts.push({ model: spec.model, prompt: spec.prompt });
+      if (spec.model === 'local') return { text: '## Summary\nsources located\n## Draft (UNVERIFIED)\ny = 7' };
+      if (limited) return { ok: false, error: 'usage limit reached, try again in 3 hours', errorClass: 'quota' };
+      return { text: '## Summary\ny = 7, verified' };
+    };
+    const dir = mkdtempSync(join(tmpdir(), 'synape-test-'));
+    const LOCAL_WEAK: Omit<ModelProfile, 'available'> = { id: 'local:default', provider: 'local', model: 'local', label: 'Local', billing: 'local', tier: 1, contextWindow: 100000, skill: { analysis: 0.55, planning: 0.4, writing: 0.5 }, ruPer1kTokens: 0.08, latencyFactor: 1 };
+    const engine = new Engine({ store: new EventStore(join(dir, 'db.sqlite')), adapters: [new ScriptedAdapter('a', script), new ScriptedAdapter('b', script), new ScriptedAdapter('local', script)], dataDir: dir, models: [...MODELS, LOCAL_WEAK] });
+    await engine.init();
+    const runId = engine.createRun({ objective: 'o', workspace: process.cwd() });
+    let s = await waitFor(engine, runId, (s) => Object.values(s.tasks).some((t) => t.preworkFor && t.status === 'completed'));
+    const big = Object.values(s.tasks).find((t) => t.title === 'Task big')!;
+    expect(big.status).toBe('ready');
+    expect(big.statusReason).toMatch(/waiting/);
+    // The real task never ran on the local model; its groundwork did.
+    expect(big.agentIds.map((a) => s.agents[a].provider)).not.toContain('local');
+    expect(s.tasks[Object.values(s.tasks).find((t) => t.preworkFor === big.id)!.id].pinnedModel).toBe('local:default');
+    expect(s.messages.some((m) => /→ Qwen \(local\)/.test(m.text))).toBe(true);
+    // The user reset the limit on the provider's website.
+    limited = false;
+    expect(engine.resetQuota()).toBeGreaterThan(0);
+    s = await waitFor(engine, runId, done);
+    expect(s.run.status).toBe('completed');
+    const finalAgent = s.agents[s.tasks[big.id].agentIds.at(-1)!];
+    expect(['a', 'b']).toContain(finalAgent.provider);
+    expect(prompts.some((p) => p.model !== 'local' && /y = 7/.test(p.prompt) && /pre-work/.test(p.prompt))).toBe(true);
     await engine.shutdown();
   });
 

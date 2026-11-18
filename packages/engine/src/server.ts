@@ -152,6 +152,10 @@ export function startServer(opts: ServerOptions) {
         for (const run of engine.store.listRuns().slice(0, 10)) for (const [k, q] of Object.entries(engine.state(run.id).quotas)) if (!quotas[k] || (quotas[k] as any).observedAt < q.observedAt) quotas[k] = q;
         return json(res, 200, { providers: [...engine.providers.values()], models: engine.models, quotas, perf: engine.store.perfTable(), freellm: engine.freeSettings() });
       }
+      if (path === '/api/quota/reset' && method === 'POST') {
+        const b = await readBody(req);
+        return json(res, 200, { cleared: engine.resetQuota(b.provider ? String(b.provider) : undefined) });
+      }
       if (path === '/api/freellm' && method === 'POST') {
         const b = await readBody(req);
         try {

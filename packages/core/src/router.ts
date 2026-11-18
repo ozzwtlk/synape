@@ -34,6 +34,9 @@ const BASE_TOKENS: Record<TaskCategory, number> = {
   planning: 25_000,
 };
 
+/** Routing refused because the capable models are out of quota (wait, don't downgrade). */
+export class QuotaBlockedError extends Error {}
+
 /** Cost multiplier for a reviewer from the author's own model family. */
 export const SAME_FAMILY_REVIEW_PENALTY = 1.5;
 
@@ -174,6 +177,10 @@ export function route(task: Task, ctx: RouterContext): RoutingDecision {
     fallback = true;
     const usable = task.pinnedModel ? [] : candidates.filter((c) => !c.rejectedBecause || c.rejectedBecause.startsWith('P(success)'));
     const best = Math.max(...usable.map((c) => c.pSuccess));
+    // A clearly stronger model exists but is out of quota: wait for it rather than
+    // hand hard work to a weak model (the caller turns this into a wait + pre-work).
+    const blocked = candidates.filter((c) => c.rejectedBecause?.startsWith('quota') && c.pSuccess > best + 0.05);
+    if (blocked.length) throw new QuotaBlockedError(`stronger models are out of quota (${blocked.map((c) => labelOf(ctx.models, c.modelId)).join(', ')})`);
     const near = usable.filter((c) => c.pSuccess >= best - 0.05).sort((a, b) => a.expected.total - b.expected.total);
     eligible = near.length ? [near[0]] : [];
     if (eligible.length) assumptions.push('No model met the quality threshold; selected the cheapest of the most capable available models.');

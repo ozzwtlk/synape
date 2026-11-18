@@ -726,6 +726,8 @@ export class Engine {
    */
   private quotaWait(s: RunState, t: Task): number | undefined {
     const out = this.exhausted(s);
+    // Also windows the provider itself reports as nearly used up (>95%).
+    for (const q of Object.values(s.quotas)) if ((q.utilization ?? 0) > 0.95 && q.resetsAt && q.resetsAt > Date.now() && !out.includes(q)) out.push(q);
     if (!out.length) return undefined;
     try {
       this.routeTask(s, t, [], true);
@@ -743,8 +745,13 @@ export class Engine {
    */
   private startPrework(runId: string, waiting: Task[]) {
     const s = this.state(runId);
-    const free = this.models.find((m) => m.preworkOnly && m.available && this.allowedProviders(s).includes(m.provider));
-    if (!free) return;
+    const allowed = this.allowedProviders(s);
+    const free = this.models.find((m) => m.preworkOnly && m.available && allowed.includes(m.provider));
+    // The heavy lifting waits for a strong model; the groundwork is split off to
+    // the local model (Qwen) when it is idle, else to free models in parallel.
+    const local = this.models.find((m) => m.provider === 'local' && m.available && allowed.includes('local'));
+    const localBusy = () => [...this.running.values()].some((r) => r.provider === 'local') || Object.values(this.state(runId).tasks).some((x) => !isTerminal(x) && x.status !== 'running' && x.pinnedModel === local?.id && x.preworkFor);
+    if (!free && !local) return;
     let live = Object.values(s.tasks).filter((x) => x.preworkFor && !isTerminal(x)).length;
     const started: string[] = [];
     for (const t of waiting) {
@@ -769,12 +776,13 @@ export class Engine {
         `prework:${t.id}`,
       );
       if (!pid) continue;
-      this.emit(runId, { type: 'task.model', taskId: pid, modelId: free.id });
-      started.push(t.title);
+      const helper = local && !localBusy() ? local : (free ?? local)!;
+      this.emit(runId, { type: 'task.model', taskId: pid, modelId: helper.id });
+      started.push(`"${t.title}" → ${helper.provider === 'local' ? 'Qwen (local)' : 'free models'}`);
       live++;
     }
     if (started.length) {
-      this.emit(runId, { type: 'chat.message', messageId: id('msg'), from: 'system', text: `Subscription models are out of quota and the local model isn't strong enough for: ${started.map((x) => `"${x}"`).join(', ')}. Free frontier models are preparing a head start (unverified notes and drafts); the real tasks run on subscription models after the reset and check that work.` });
+      this.emit(runId, { type: 'chat.message', messageId: id('msg'), from: 'system', text: `The models strong enough for these tasks are out of quota, so they wait for the reset instead of running on a weaker model. Meanwhile the groundwork is split off (unverified notes, sources, a draft): ${started.join(', ')}. The heavy lifting runs on the subscription model after the reset and checks that work.` });
       this.scheduleTick(runId);
     }
   }
@@ -790,12 +798,11 @@ export class Engine {
   private routeTask(s: RunState, t: Task, excludeProviders: string[] = [], ignoreQuota = false): RoutingDecision {
     const quotaUtilization: Record<string, number> = {};
     if (!ignoreQuota) for (const q of Object.values(s.quotas)) if (q.utilization !== undefined && !(q.resetsAt && q.resetsAt < Date.now())) quotaUtilization[q.provider] = Math.max(quotaUtilization[q.provider] ?? 0, q.utilization);
-    // Resume an interrupted session on the same model when possible (not on a provider that is out of quota).
+    // Resume an interrupted session on the same model when possible: not on a
+    // provider that is out of quota, and not on a model the router would no
+    // longer accept for this task (e.g. a fallback that ran while others were limited).
     const last = t.agentIds.length ? s.agents[t.agentIds.at(-1)!] : undefined;
-    if (last?.status === 'interrupted' && last.sessionId && (!t.pinnedModel || t.pinnedModel === last.modelId) && !excludeProviders.includes(last.provider) && (quotaUtilization[last.provider] ?? 0) <= 0.95) {
-      const m = this.models.find((x) => x.id === last.modelId && x.available);
-      if (m) return { modelId: m.id, provider: m.provider, model: m.model, effort: m.effort, explanation: `Resuming interrupted session ${last.sessionId.slice(0, 8)} on ${m.label}`, candidates: [], assumptions: [], estTokens: 0 };
-    }
+    const resumable = last?.status === 'interrupted' && last.sessionId && (!t.pinnedModel || t.pinnedModel === last.modelId) && !excludeProviders.includes(last.provider) && (quotaUtilization[last.provider] ?? 0) <= 0.95;
     const saturated = new Set<string>();
     for (const [p, cap] of Object.entries(s.run.config.limits.providerConcurrency)) if ([...this.running.values()].filter((r) => r.provider === p).length >= cap) saturated.add(p);
     let authorModelId: string | undefined;
@@ -818,6 +825,11 @@ export class Engine {
       authorModelId,
     });
     if (pdf) d.explanation = d.explanation.replace('model chosen by user (routing bypassed)', 'PDF work stays on the local model');
+    if (resumable && last) {
+      const m = this.models.find((x) => x.id === last.modelId && x.available);
+      const ok = d.modelId === last.modelId || d.candidates.find((c) => c.modelId === last.modelId)?.eligible;
+      if (m && ok) return { ...d, modelId: m.id, provider: m.provider, model: m.model, effort: m.effort, explanation: `Resuming interrupted session ${last.sessionId!.slice(0, 8)} on ${m.label}`, estTokens: 0 };
+    }
     return d;
   }
 
@@ -1275,6 +1287,27 @@ export class Engine {
     this.emit(runId, { type: 'chat.message', messageId: id('msg'), from: 'system', text: `${provider} usage limit reached (${error.slice(0, 160)}). Its work moves to other models until ${when}; tasks only wait if no capable model has quota left.` }, { dedupeKey: `limit:${provider}:${Math.round(resetAt / 600_000)}` });
     this.armWake(runId, resetAt);
     this.scheduleTick(runId);
+  }
+
+  /**
+   * The user says a limit no longer applies (reset on the website, plan
+   * upgraded…): clear the recorded usage for a provider (or all) in every run.
+   * The next request reports the real numbers again; a provider that is still
+   * limited fails fast and is marked again.
+   */
+  resetQuota(provider?: string) {
+    let n = 0;
+    for (const r of this.store.listRuns()) {
+      const s = this.state(r.id);
+      const qs = Object.values(s.quotas).filter((q) => (!provider || q.provider === provider) && ((q.utilization ?? 0) > 0 || q.status === 'rejected'));
+      for (const q of qs) this.emit(r.id, { type: 'quota', provider: q.provider, window: q.window, utilization: 0, status: 'allowed' });
+      if (qs.length) {
+        n += qs.length;
+        this.emit(r.id, { type: 'chat.message', messageId: id('msg'), from: 'system', text: `Quota reloaded for ${provider ?? 'all providers'} (marked available again). Waiting tasks are retried now.` });
+        if (['running', 'planning'].includes(s.run.status)) this.scheduleTick(r.id);
+      }
+    }
+    return n;
   }
 
   /** Quota windows currently marked exhausted (limit hit, reset still ahead). */

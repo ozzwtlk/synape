@@ -153,6 +153,15 @@ The server log is at `~/.local/share/synape/local-llm.log`. You can switch the m
 
 **Failover.** When a provider reports its usage limit, Synape marks it exhausted until the reset time and moves its work to the remaining models. Nothing pauses and no retry is spent. A task waits only if no capable model has quota left. It starts automatically at the reset, or sooner when you press *Resume*, which also retries the exhausted providers.
 
+**Hard work waits; it is never downgraded.** If only clearly weaker models have quota left (for example, Qwen for a complexity-5 derivation), the task waits for the reset instead of running on them. Its groundwork is split off meanwhile:
+
+- **Qwen (local):** gets the groundwork when it is idle.
+- **Free models:** get it otherwise (below), in parallel.
+
+The heavy lifting then runs on the subscription model. A session interrupted by a restart resumes only on a model the router still accepts for the task.
+
+**Reload quota.** If you reset a limit on the provider's website, press *Reload quota* (Fleet, or the resource panel). The provider is marked available again and waiting tasks retry at once. The next request reports the real usage, and a provider that is still limited is marked again.
+
 **Pre-work on free models (optional).** While a task waits that way, Synape can give it a head start using free frontier models behind a self-hosted [FreeLLMAPI](https://github.com/tashfeenahmed/freellmapi) gateway. FreeLLMAPI puts the free tiers of many providers behind one OpenAI-compatible endpoint, and Synape asks it for `auto:smart`, the strongest models available.
 
 The pre-work agent is read-only. It returns:

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { BUILTIN_MODELS, DEFAULT_PROVIDER_WEIGHT, route, findCycle, topoOrder, type ModelProfile, type Task } from '../src/index.ts';
+import { BUILTIN_MODELS, DEFAULT_PROVIDER_WEIGHT, QuotaBlockedError, route, findCycle, topoOrder, type ModelProfile, type Task } from '../src/index.ts';
 
 const models: ModelProfile[] = BUILTIN_MODELS.map((m) => ({ ...m, available: true }));
 const task = (p: Partial<Task>): Task =>
@@ -112,6 +112,13 @@ describe('router', () => {
       expect(d.modelId).not.toBe('claude-code:sonnet');
       expect(d.explanation).toMatch(/same family/);
     });
+  });
+
+  it('hard work waits for strong models that are out of quota instead of dropping to a weak one', () => {
+    const t = task({ category: 'reasoning', complexity: 5, criticality: 3 });
+    expect(() => route(t, { ...ctx, quotaUtilization: { 'claude-code': 1, codex: 1 } })).toThrow(QuotaBlockedError);
+    // Light work still goes to whatever capable model has quota.
+    expect(route(task({ category: 'extraction', complexity: 1 }), { ...ctx, quotaUtilization: { 'claude-code': 1, codex: 1 } }).provider).toBe('local');
   });
 
   it('a pinned model is allowed even outside the run provider list', () => {
