@@ -46,7 +46,7 @@ Rules:
 - Copy equations, numbers and units exactly. Mark anything you infer as "inferred".
 - Your draft is a starting point, not a result: label it UNVERIFIED and say where you are unsure.
 - Keep the whole answer under ~1500 words. Lists over prose.
-- You cannot open PDFs (they are processed by a local model). Use existing digests or notes; for a PDF that matters, give its path and what to look for.`;
+- If a digest of a PDF already exists (from the local model), use it instead of re-reading the PDF.`;
 
 export class FreeLLMAdapter implements ProviderAdapter {
   id = 'freellm';
@@ -91,8 +91,6 @@ export class FreeLLMAdapter implements ProviderAdapter {
       label: 'free',
       skills: FREE_SKILLS,
       sessionPrefix: 'free',
-      // PDF handling belongs to the local model: never ship PDF text to third-party free tiers.
-      noPdf: true,
       // Gateway quota exhausted or every upstream rate-limited: a provider problem, not the task's fault.
       classify: (e: Error & { status?: number }): ErrorClass => (e.status === 429 || e.status === 402 || (e.status ?? 0) >= 500 ? 'provider' : /context|too long|exceed/i.test(e.message) ? 'task' : 'provider'),
       onHeaders: (h) => {

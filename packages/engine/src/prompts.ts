@@ -104,7 +104,7 @@ const PLANNING_RULES = `Planning rules:
 - permission: the minimum needed. "read" for analysis; "write" to create/edit files; "execute" to run code/tests; "network" for web search.
 - A final synthesis task is added automatically; do not add one.
 - model: leave "" so the router picks the cheapest capable model. Set a model id only to honour an explicit user request (e.g. "use the local model / Qwen for the PDF reading" → that model on those tasks). Never pick an expensive model on your own.
-- PDFs are read only by the local model: put PDF reading/digesting in its own task (category "extraction", or "analysis" with complexity ≤ 3, PDF paths in scope). It runs on the local model and produces a digest with page citations; make the tasks that need the content depend on it instead of re-reading the PDFs.
+- PDF reading/digesting goes in its own task (category "extraction", or "analysis" with complexity ≤ 3, PDF paths in scope) so it runs on the local model and produces a digest with page citations; make the tasks that need the content depend on it instead of re-reading the PDFs.
 - Token economy: other bulky, low-difficulty reading (long files, extraction, summaries) should also be its own complexity 1–2 task so it can run on the cheap/local model; keep hard reasoning in separate, smaller tasks.
 - It is acceptable for the outcome to be negative (e.g. "nothing new can be claimed"); plan to establish the truth, not to confirm a hoped-for result.`;
 

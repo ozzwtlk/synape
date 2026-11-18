@@ -706,8 +706,7 @@ export class Engine {
       const busyOf = (p: string) => [...this.running.values()].filter((r) => r.provider === p).length;
       if (busyOf(decision.provider) >= capOf(decision.provider)) {
         // A short queue for the local model is worth it (no quota spent); a long one is not.
-        // PDF work waits for the local model rather than sending PDFs to the cloud.
-        if (decision.provider !== 'local' || t.pinnedModel || this.pdfLocal(s, t) || ++localQueued <= LOCAL_QUEUE) continue;
+        if (decision.provider !== 'local' || t.pinnedModel || ++localQueued <= LOCAL_QUEUE) continue;
         try {
           decision = this.routeTask(s, t, ['local']);
         } catch {
@@ -823,8 +822,9 @@ export class Engine {
   }
 
   /**
-   * PDF reading and digesting runs on the local model: it is token-heavy,
-   * within the local model's ability, and keeps PDF contents on this machine.
+   * PDF reading and digesting prefers the local model: it is token-heavy and
+   * within its ability. Other models still take it when the local model is
+   * unavailable, its queue overflows, or the task is too hard for it.
    * Returns the local model id when this task should go there.
    */
   private pdfLocal(s: RunState, t: Task, excludeProviders: string[] = []): string | undefined {

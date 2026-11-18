@@ -156,16 +156,10 @@ describe('free models (FreeLLMAPI gateway)', () => {
     expect(ev.some((e) => e.kind === 'system' && e.text === 'served by groq/llama-4-maverick')).toBe(true);
   });
 
-  it('never gives free models PDF contents', async () => {
-    writeFileSync(join(ws, 'paper.pdf'), '%PDF-1.4 secret');
+  it('free models can read PDFs too', async () => {
     requests.length = 0;
-    script = (n) => (n === 1 ? { tool: { name: 'read_file', args: { path: 'paper.pdf' } } } : n === 2 ? { tool: { name: 'pdf_text', args: { path: 'paper.pdf' } } } : { content: 'done' });
-    const ev = await collect(new FreeLLMAdapter(() => fc).run(spec({ model: 'auto:smart' })));
-    expect(requests[0].tools.map((t: any) => t.function.name)).not.toContain('pdf_text');
-    const ends = ev.filter((e) => e.kind === 'tool_end') as Extract<AdapterEvent, { kind: 'tool_end' }>[];
-    expect(ends.map((e) => e.ok)).toEqual([false, false]);
-    expect(ends.every((e) => /stay on the local model/.test(e.output))).toBe(true);
-    expect(JSON.stringify(requests)).not.toContain('secret');
+    await collect(new FreeLLMAdapter(() => fc).run(spec({ model: 'auto:smart' })));
+    expect(requests[0].tools.map((t: any) => t.function.name)).toContain('pdf_text');
   });
 });
 
