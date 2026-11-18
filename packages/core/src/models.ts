@@ -130,4 +130,15 @@ export const BUILTIN_MODELS: Omit<ModelProfile, 'available'>[] = [
   },
 ];
 
+/**
+ * Quota-pressure multiplier per provider, applied on top of the catalog RU.
+ * Codex agents burn far more tokens per task (long tool loops, big cached
+ * re-reads) and its plan limits are much tighter, so a "cheap" Codex model
+ * still drains its 5-hour window faster than a Claude model doing the same
+ * work. At ×3 the router uses Codex only when no Claude/local model is good
+ * enough, Claude's quota is nearly used up, or the user pins it.
+ * Adjustable per provider in the Fleet panel (settings.json `providerWeight`).
+ */
+export const DEFAULT_PROVIDER_WEIGHT: Record<string, number> = { codex: 3 };
+
 export const familyOf = (provider: string) => (provider === 'claude-code' ? 'anthropic' : provider === 'codex' ? 'openai' : provider);

@@ -85,7 +85,8 @@ export function NewRun({ onClose, providers }: { onClose: () => void; providers?
         config: {
           permissionCeiling: ceiling,
           extraDirs: extra.split('\n').map((x) => x.trim()).filter(Boolean),
-          providers: allowed,
+          // Record what the user switched OFF, so providers that appear later (e.g. a local model) are allowed.
+          excludedProviders: avail.filter((p) => !allowed.includes(p)),
           qualityBias: quality,
           limits: { maxDepth, maxConcurrentAgents: maxAgents },
           budgets: { maxTokens },

@@ -23,6 +23,7 @@ export type EventBody =
   | { type: 'run.created'; runId: string; title: string; objective: string; workspace: string; config: RunConfig }
   | { type: 'run.status'; status: RunStatus; reason?: string; resumeAt?: number }
   | { type: 'run.config'; config: RunConfig }
+  | { type: 'run.compacted'; chapter: number; memory: string; archived: string[] }
   | { type: 'chat.message'; messageId: string; from: 'user' | 'orchestrator' | 'system' | 'agent'; agentId?: string; text: string; refs?: string[] }
   | ({ type: 'task.created'; taskId: string; parentTaskId?: string; createdBy?: string; depth: number; deps: string[]; reviewOf?: string } & TaskSpec)
   | { type: 'task.deps'; taskId: string; deps: string[] }

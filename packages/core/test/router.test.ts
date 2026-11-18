@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { BUILTIN_MODELS, route, findCycle, topoOrder, type ModelProfile, type Task } from '../src/index.ts';
+import { BUILTIN_MODELS, DEFAULT_PROVIDER_WEIGHT, route, findCycle, topoOrder, type ModelProfile, type Task } from '../src/index.ts';
 
 const models: ModelProfile[] = BUILTIN_MODELS.map((m) => ({ ...m, available: true }));
 const task = (p: Partial<Task>): Task =>
@@ -81,6 +81,49 @@ describe('router', () => {
     const pick = d.candidates.find((c) => c.modelId === d.modelId)!;
     expect(pick.expected.verification).toBeGreaterThan(0);
     expect(pick.expected.total).toBeCloseTo(pick.expected.execution + pick.expected.expectedRetry + pick.expected.verification + pick.expected.expectedEscalation);
+  });
+
+  describe('with default provider quota weights (as the engine applies them)', () => {
+    const weighted = models.map((m) => ({ ...m, ruPer1kTokens: m.ruPer1kTokens * (DEFAULT_PROVIDER_WEIGHT[m.provider] ?? 1) }));
+    const wctx = { ...ctx, models: weighted.map((m) => ({ ...m, available: m.id !== 'claude-code:fable' })) };
+
+    it('keeps routine and mid-difficulty work off Codex', () => {
+      for (const category of ['extraction', 'analysis', 'coding', 'reasoning', 'writing', 'research'] as const)
+        for (const complexity of [1, 2, 3]) {
+          const d = route(task({ category, complexity, verification: 'review' }), wctx);
+          expect(d.provider, `${category} c${complexity}`).not.toBe('codex');
+        }
+    });
+
+    it('sends bulky low-difficulty reading to the local model', () => {
+      expect(route(task({ category: 'extraction', complexity: 2 }), wctx).provider).toBe('local');
+      expect(route(task({ category: 'analysis', complexity: 2 }), wctx).provider).toBe('local');
+    });
+
+    it('still uses Codex when it is really needed', () => {
+      expect(route(task({ category: 'coding', complexity: 5, criticality: 3 }), wctx).provider).toBe('codex');
+      // Claude near its 5-hour limit: Codex takes over.
+      expect(route(task({ category: 'analysis', complexity: 3 }), { ...wctx, quotaUtilization: { 'claude-code': 0.97 } }).provider).not.toBe('claude-code');
+    });
+
+    it('lets a cheaper same-family model review rather than an expensive cross-family one', () => {
+      const d = route(task({ kind: 'review', category: 'review', complexity: 3 }), { ...wctx, authorModelId: 'claude-code:sonnet' });
+      expect(d.provider).toBe('claude-code');
+      expect(d.modelId).not.toBe('claude-code:sonnet');
+      expect(d.explanation).toMatch(/same family/);
+    });
+  });
+
+  it('a pinned model is allowed even outside the run provider list', () => {
+    const d = route(task({ pinnedModel: 'local:default' }), { ...ctx, allowedProviders: ['claude-code'] });
+    expect(d.modelId).toBe('local:default');
+  });
+
+  it('when nothing clears the bar, prefers the cheaper of near-equal models', () => {
+    const d = route(task({ category: 'reasoning', complexity: 5, criticality: 3 }), ctx);
+    const top = Math.max(...d.candidates.filter((c) => !c.rejectedBecause || c.rejectedBecause.startsWith('P(')).map((c) => c.pSuccess));
+    const near = d.candidates.filter((c) => c.pSuccess >= top - 0.05 && (!c.rejectedBecause || c.rejectedBecause.startsWith('P(')));
+    expect(d.modelId).toBe(near.sort((a, b) => a.expected.total - b.expected.total)[0].modelId);
   });
 
   it('avoids providers near their quota limit', () => {

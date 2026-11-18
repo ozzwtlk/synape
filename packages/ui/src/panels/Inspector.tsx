@@ -131,6 +131,17 @@ function Overview({ s, t, agent, runId, providers }: { s: RunState; t: Task; age
           <Markdown text={t.resultSummary} />
         </section>
       )}
+      {t.id === s.run.rootTaskId && s.run.memory && (
+        <details className="card">
+          <summary className="eyebrow" style={{ cursor: 'pointer' }}>
+            Orchestrator memory · {s.run.chapter} finished mission{(s.run.chapter ?? 0) > 1 ? 's' : ''}
+          </summary>
+          <p className="faint" style={{ fontSize: 11 }}>
+            Finished nodes are archived (graph → History). Follow-ups plan from this digest and open the listed reports only when needed.
+          </p>
+          <Markdown text={s.run.memory} />
+        </details>
+      )}
       {t.statusReason && (
         <div className={`note ${t.status === 'failed' ? 'bad' : ''}`}>
           <span className="faint">status:</span> {t.statusReason}

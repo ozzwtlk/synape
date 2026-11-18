@@ -54,6 +54,7 @@ export function Graph() {
   const [mode, setMode] = useState<LayoutMode>('orbit');
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [focusMode, setFocusMode] = useState(false);
+  const [history, setHistory] = useState(false);
   const rf = useReactFlow();
   const [tick, setTick] = useState(0);
 
@@ -64,18 +65,20 @@ export function Graph() {
     return n;
   }), []);
 
+  const archivedCount = useMemo(() => (state ? Object.values(state.tasks).filter((t) => t.archived && t.kind !== 'review').length : 0), [state, version]);
+
   const selectedTaskId = selection ? (selection.kind === 'task' ? selection.id : state?.agents[selection.id]?.taskId) : undefined;
 
   const { nodes, edges, activeCount, structureKey, rings } = useMemo(() => {
     if (!state) return { nodes: [] as (TaskFlowNode | ComputeFlowNode)[], edges: [] as SynapseFlowEdge[], activeCount: 0, structureKey: '', rings: [] as { id: string; x: number; y: number; r: number; live: boolean; dim: boolean }[] };
-    const tasks = visibleTasks(state, collapsed);
+    const tasks = visibleTasks(state, collapsed, history);
     const pos = layout(tasks, mode);
     const visible = new Set(tasks.map((t) => t.id));
     const near = focusMode && selectedTaskId ? neighborhood(state, selectedTaskId) : null;
     const childCount = new Map<string, number>();
     const kidsOf = new Map<string, KidMark[]>();
     for (const t of Object.values(state.tasks)) {
-      if (!t.parentTaskId) continue;
+      if (!t.parentTaskId || (t.archived && !history)) continue;
       childCount.set(t.parentTaskId, (childCount.get(t.parentTaskId) ?? 0) + 1);
       if (t.kind === 'review') continue;
       const ka = latestAgent(state, t);
@@ -162,7 +165,7 @@ export function Graph() {
     const rings = [...orbitRings].map(([id, r]) => ({ id, ...r, live: tasks.some((k) => k.parentTaskId === id && isActive(latestAgent(state, k))), dim: !!near && !near.has(id) }));
     return { nodes, edges, activeCount, structureKey, rings };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state, version, collapsed, mode, selectedTaskId, focusMode, animate, cursor, tick, toggle]);
+  }, [state, version, collapsed, mode, selectedTaskId, focusMode, animate, cursor, tick, toggle, history]);
 
   // Expire pulses after their animation (cheap re-derive).
   useEffect(() => {
@@ -248,6 +251,11 @@ export function Graph() {
           <button className={`btn sm ${focusMode ? 'primary' : ''}`} onClick={() => setFocusMode((f) => !f)} title="Dim everything outside the selected task's neighbourhood">
             Focus
           </button>
+          {archivedCount > 0 && (
+            <button className={`btn sm ${history ? 'primary' : 'ghost'}`} onClick={() => setHistory((h) => !h)} title={`Finished missions (chapter${(state?.run.chapter ?? 0) > 1 ? 's' : ''} 1–${state?.run.chapter ?? 1}) are folded into the orchestrator's memory. Show their nodes again.`}>
+              History · {archivedCount}
+            </button>
+          )}
           {collapsed.size > 0 && (
             <button className="btn sm ghost" onClick={() => setCollapsed(new Set())}>
               Expand all

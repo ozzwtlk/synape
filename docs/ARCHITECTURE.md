@@ -72,9 +72,11 @@ E[total] = execution + E[retry] + verification + E[escalation]
 over models whose estimated success probability clears a bar set by the task's criticality and the run's quality bias.
 
 - **P(success)** is a Beta posterior: the catalog's skill prior for (model, category, complexity), weighted as 6 pseudo-observations, updated with local history (`perf` table: success means accepted by independent review).
-- **Small samples are not conclusive.** At cold start, eligibility uses the prior. With evidence, a model is excluded only when the optimistic 90th-percentile bound falls below the bar. Expected cost still uses the mean, so early failures make a model more expensive without banning it.
+- **Small samples are not conclusive.** At cold start, eligibility uses the prior, with a 0.03 margin (priors are guesses; a few hundredths of assumed skill must not force work onto a far more expensive model). With evidence, a model is excluded only when the optimistic 90th-percentile bound falls below the bar. Expected cost still uses the mean, so early failures make a model more expensive without banning it.
 - **Execution cost** = estimated tokens × the model's Resource Units per 1k tokens. Token estimates come from category and complexity priors blended with observed means.
-- **Verification** = the cheapest viable reviewer from the *other model family*.
+- **Provider quota weight** multiplies a provider's RU (Fleet panel, `settings.json` `providerWeight`). Codex defaults to ×3: its agents use far more tokens per task and its plan windows are tighter, so it should take work only when no Claude or local model is good enough, Claude's quota is nearly spent, or the user asks for it.
+- **Verification** = the cheapest viable reviewer that isn't the author. Another model family is preferred: a same-family reviewer costs ×1.5 rather than being excluded, so a review never has to go to a far more expensive provider just for independence.
+- **Fallback.** When no model clears the bar, the router takes the cheapest model within 0.05 of the best P(success).
 - **Escalation** = P(all retries fail) × cost of the cheapest stronger tier.
 - **Live signals.** Subscription utilization above 70% (from Claude's `rate_limit_event`) adds a penalty, and above 95% excludes the provider. Saturated provider concurrency adds a small opportunity-cost penalty.
 
@@ -95,7 +97,7 @@ Resource Units are documented as relative quota pressure, never as money.
 
 ## 4. Independent verification
 
-Tasks marked `review` or `crosscheck` enter `awaiting_review` after the author finishes. A review task is created and routed with `authorModelId`, so the router refuses the author model and prefers the other model family. Reviewers receive the acceptance criteria, the author's report, the diff (for write tasks) and read access to the author's worktree (execute access when the run ceiling allows, so they can re-run tests). They return a schema-validated verdict.
+Tasks marked `review` or `crosscheck` enter `awaiting_review` after the author finishes. A review task is created and routed with `authorModelId`, so the router refuses the author model and prefers the other model family (a different same-family model at a ×1.5 cost premium). Reviewers receive the acceptance criteria, the author's report, the diff (for write tasks) and read access to the author's worktree (execute access when the run ceiling allows, so they can re-run tests). They return a schema-validated verdict.
 
 - `pass`: the task is verified, recorded as a success for the author model, and its branch is merged into the run's integration branch.
 - `revise` or `fail`: the author gets precise feedback and retries (escalating on evidence).
@@ -148,3 +150,14 @@ The UI keeps a mutable `RunState`, applies streamed events with the shared reduc
 | 6 | Native TypeScript execution in Node | tsc build, tsx | No build step for the engine. `erasableSyntaxOnly` keeps it valid. |
 | 7 | Beta-posterior router with explicit priors | Static rules, LLM-as-router | Explainable, testable, learns locally, honest about uncertainty. Costs no tokens. |
 | 8 | Git worktrees + integration branch | Shared checkout with locks | Parallel writers cannot corrupt each other. Full audit trail. User checkout untouched. |
+
+## Missions and memory
+
+A run can hold several missions. When a mission completes (its final synthesis is done), the engine emits `run.compacted`. That event:
+
+- archives every finished task except the root orchestrator, which hides them from the graph (*History* shows them again)
+- appends a bounded digest to `run.memory`: the TL;DR, the final report path, one line per result with its report and files, and anything not completed
+
+A follow-up then starts a new chapter. The replan prompt contains the memory and the live tasks only, never the old graph. The orchestrator opens a listed report only when the instruction needs the detail. The chapter's synthesis starts fresh, and task and agent limits count the current chapter. Retrying an archived task brings it back into the live graph.
+
+The orchestrator's plan items carry a `model` field. It is empty for automatic routing; a model id relays an explicit user request ("use Qwen for the PDFs") and becomes a pin. Runs created with a provider allowlist (`providers`) always admit the local model, because it costs no quota and may postdate the run. New runs record `excludedProviders` instead.

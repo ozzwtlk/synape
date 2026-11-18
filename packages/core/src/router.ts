@@ -34,6 +34,16 @@ const BASE_TOKENS: Record<TaskCategory, number> = {
   planning: 25_000,
 };
 
+/** Cost multiplier for a reviewer from the author's own model family. */
+export const SAME_FAMILY_REVIEW_PENALTY = 1.5;
+
+/**
+ * Cold-start priors are guesses: a model within this margin of the quality bar
+ * stays eligible (its expected retry/escalation cost still counts), so a few
+ * hundredths of assumed skill can't force work onto a far more expensive model.
+ */
+export const COLD_START_SLACK = 0.03;
+
 /** Prior weight of cold-start belief, in pseudo-observations. */
 const PRIOR_STRENGTH = 6;
 
@@ -86,7 +96,8 @@ export function route(task: Task, ctx: RouterContext): RoutingDecision {
     'Costs in Resource Units (RU): relative quota pressure per 1k tokens, not money (subscription billing).',
     `Cold-start success priors from catalog skill scores, weighted as ${PRIOR_STRENGTH} pseudo-observations.`,
   ];
-  const allowed = (m: ModelProfile) => !ctx.allowedProviders || ctx.allowedProviders.includes(m.provider);
+  // A model the user pinned is allowed even if its provider isn't in the run's list.
+  const allowed = (m: ModelProfile) => m.id === task.pinnedModel || !ctx.allowedProviders || ctx.allowedProviders.includes(m.provider);
   const pool = ctx.models.filter((m) => m.available && allowed(m));
   const author = ctx.authorModelId ? ctx.models.find((m) => m.id === ctx.authorModelId) : undefined;
   const otherFamilyAvailable = author ? pool.some((m) => familyOf(m.provider) !== familyOf(author.provider)) : false;
@@ -97,11 +108,13 @@ export function route(task: Task, ctx: RouterContext): RoutingDecision {
   const reviewCostFor = (authorM: ModelProfile, tokens: number) => {
     if (!reviewNeeded) return 0;
     const reviewTokens = Math.round(tokens * 0.4);
-    const reviewers = pool.filter((r) => r.id !== authorM.id && (familyOf(r.provider) !== familyOf(authorM.provider) || !pool.some((x) => familyOf(x.provider) !== familyOf(authorM.provider))));
+    const reviewers = pool.filter((r) => r.id !== authorM.id);
     const viable = reviewers.filter((r) => priorSuccess(r, 'review', task.complexity) >= 0.6);
     const set = viable.length ? viable : reviewers;
     if (!set.length) return 0;
-    return Math.min(...set.map((r) => execCost(r, reviewTokens)));
+    const crossExists = pool.some((x) => familyOf(x.provider) !== familyOf(authorM.provider));
+    const premium = (r: ModelProfile) => (crossExists && familyOf(r.provider) === familyOf(authorM.provider) ? SAME_FAMILY_REVIEW_PENALTY : 1);
+    return Math.min(...set.map((r) => execCost(r, reviewTokens) * premium(r)));
   };
 
   const candidates: RouteCandidate[] = ctx.models.filter(allowed).map((m) => {
@@ -113,6 +126,11 @@ export function route(task: Task, ctx: RouterContext): RoutingDecision {
     const q = ctx.quotaUtilization?.[m.provider];
     if (q !== undefined && q > 0.7) penalty *= 1 + (q - 0.7) * 3;
     if (ctx.saturated?.has(m.provider)) penalty *= 1.15;
+    // Independence: a reviewer from another model family is preferred, but a
+    // different model of the same family is allowed at a premium rather than
+    // forcing every review onto the other (possibly far more expensive) provider.
+    const sameFamily = !!author && otherFamilyAvailable && familyOf(m.provider) === familyOf(author.provider);
+    if (sameFamily) penalty *= SAME_FAMILY_REVIEW_PENALTY;
     const exec = execCost(m, tokens) * penalty;
     const p = post.mean;
     let retry = 0;
@@ -137,24 +155,26 @@ export function route(task: Task, ctx: RouterContext): RoutingDecision {
     else if (m.tier < task.minTier) rejectedBecause = `below escalation floor (tier ${task.minTier})`;
     else if (task.excludedModels.includes(m.id)) rejectedBecause = 'failed this task before';
     else if (author && m.id === author.id) rejectedBecause = 'is the author (no self-review)';
-    else if (author && otherFamilyAvailable && familyOf(m.provider) === familyOf(author.provider)) rejectedBecause = 'same model family as author';
     else if (q !== undefined && q > 0.95) rejectedBecause = `quota ${Math.round(q * 100)}% used`;
     else if (tokens * 0.6 > m.contextWindow) rejectedBecause = 'context window too small';
     // Cold start: gate on the prior. With evidence, exclude only when it is confident:
     // the optimistic (90th pct) bound is below the bar.
     // Expected cost still uses the mean, so early failures raise the retry term without being conclusive.
-    else if ((post.samples ? post.high : p) < needP) rejectedBecause = `P(success) ${p.toFixed(2)} (≤${post.high.toFixed(2)}) < required ${needP.toFixed(2)}`;
+    else if ((post.samples ? post.high : p + COLD_START_SLACK) < needP) rejectedBecause = `P(success) ${p.toFixed(2)} (≤${post.high.toFixed(2)}) < required ${needP.toFixed(2)}`;
     return { modelId: m.id, pSuccess: p, pSuccessLow: post.low, samples: post.samples, expected, eligible: !rejectedBecause, rejectedBecause };
   });
 
   let eligible = candidates.filter((c) => c.eligible);
   let fallback = false;
   if (!eligible.length) {
-    // Nothing clears the bar: take the most capable model that is otherwise usable.
+    // Nothing clears the bar: take a most capable usable model; among near-equals
+    // (within 0.05 P(success)) the cheapest, so a tie never defaults to the dearest provider.
     fallback = true;
     const usable = task.pinnedModel ? [] : candidates.filter((c) => !c.rejectedBecause || c.rejectedBecause.startsWith('P(success)'));
-    eligible = usable.length ? [usable.sort((a, b) => b.pSuccess - a.pSuccess)[0]] : [];
-    if (eligible.length) assumptions.push('No model met the quality threshold; selected the most capable available model.');
+    const best = Math.max(...usable.map((c) => c.pSuccess));
+    const near = usable.filter((c) => c.pSuccess >= best - 0.05).sort((a, b) => a.expected.total - b.expected.total);
+    eligible = near.length ? [near[0]] : [];
+    if (eligible.length) assumptions.push('No model met the quality threshold; selected the cheapest of the most capable available models.');
   }
   if (!eligible.length) throw new Error(task.pinnedModel ? `Pinned model ${task.pinnedModel} is not available (${candidates.find((c) => c.modelId === task.pinnedModel)?.rejectedBecause ?? 'unknown model'})` : `No available model can run task "${task.title}"`);
 
@@ -175,7 +195,10 @@ export function route(task: Task, ctx: RouterContext): RoutingDecision {
   ];
   if (task.pinnedModel) parts.push('model chosen by user (routing bypassed)');
   else if (cheaperRejected.length) parts.push(`cheaper rejected: ${cheaperRejected.join('; ')}`);
-  if (author) parts.push(`independent of author ${labelOf(ctx.models, author.id)}`);
+  if (author) {
+    const same = familyOf(m.provider) === familyOf(author.provider);
+    parts.push(`independent of author ${labelOf(ctx.models, author.id)}${same && otherFamilyAvailable ? ` (same family, cheaper than cross-family even with ×${SAME_FAMILY_REVIEW_PENALTY} premium)` : ''}`);
+  }
   if (fallback) parts.push('fallback: no model met the bar');
 
   return {

@@ -91,6 +91,11 @@ export function applyEvent(s: RunState, e: EventEnvelope): RunState {
     case 'run.config':
       s.run.config = b.config;
       break;
+    case 'run.compacted':
+      s.run.chapter = b.chapter;
+      s.run.memory = b.memory;
+      for (const id of b.archived) if (s.tasks[id]) s.tasks[id].archived = true;
+      break;
     case 'chat.message':
       s.messages.push({ id: b.messageId, from: b.from, agentId: b.agentId, text: b.text, refs: b.refs, ts: e.ts });
       break;
@@ -126,6 +131,8 @@ export function applyEvent(s: RunState, e: EventEnvelope): RunState {
       if (!t) break;
       t.status = b.status;
       t.statusReason = b.reason;
+      // Reopening an archived task (retry, model change) brings it back into the live graph.
+      if (t.archived && !['completed', 'failed', 'cancelled'].includes(b.status) && t.id !== s.run.rootTaskId) t.archived = false;
       if (b.status === 'running') {
         t.startedAt ??= e.ts;
         t.endedAt = undefined;
@@ -175,6 +182,7 @@ export function applyEvent(s: RunState, e: EventEnvelope): RunState {
       t.status = b.status;
       t.statusReason = b.reason;
       t.endedAt = undefined;
+      if (t.id !== s.run.rootTaskId) t.archived = false;
       t.attemptFloor = t.agentIds.length;
       t.excludedModels = [];
       t.feedback = undefined;

@@ -72,8 +72,13 @@ export interface RunConfig {
   permissionCeiling: PermissionLevel;
   /** Extra directories agents may read (e.g. a shared tool installation or dataset). */
   extraDirs: string[];
-  /** Providers allowed in this run (subset of those available). */
+  /**
+   * Legacy allowlist (runs created before excludedProviders). The local model is
+   * always admitted on top of it: it costs no quota and may not have existed yet.
+   */
   providers?: string[];
+  /** Providers the user switched off for this run. */
+  excludedProviders?: string[];
   /** Routing preference: 0 = cheapest viable, 1 = most reliable. */
   qualityBias: number;
 }
@@ -115,6 +120,8 @@ export interface ModelProfile {
    * For subscriptions this models quota pressure, NOT money.
    */
   ruPer1kTokens: number;
+  /** Provider quota weight already folded into ruPer1kTokens (1 = catalog value). */
+  quotaWeight?: number;
   /** USD per 1M input/output tokens, only for API billing. */
   usdPerMTok?: { input: number; output: number };
   /** Typical seconds per task relative to baseline 1.0 */
@@ -224,6 +231,8 @@ export interface Task extends TaskSpec {
   computeOpen?: Record<string, { program: string; agentId: string }>;
   /** Model chosen by the user for this task; bypasses routing. */
   pinnedModel?: string;
+  /** Finished in an earlier chapter of the run: folded into run memory, hidden from the graph. */
+  archived?: boolean;
   /** Agents before this index don't count toward retry limits (task was reopened). */
   attemptFloor?: number;
   resultSummary?: string;
@@ -364,6 +373,10 @@ export interface RunInfo {
   endedAt?: number;
   rootTaskId?: string;
   finalArtifactId?: string;
+  /** Completed missions so far; follow-ups after a completion start a new chapter. */
+  chapter?: number;
+  /** Digest of earlier chapters, given to the orchestrator instead of the old graph. */
+  memory?: string;
 }
 
 export interface Signal {

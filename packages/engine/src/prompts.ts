@@ -3,7 +3,7 @@ import type { PermissionLevel, RunState, Task } from '@synape/core';
 const taskItem = {
   type: 'object',
   additionalProperties: false,
-  required: ['key', 'title', 'objective', 'kind', 'category', 'complexity', 'criticality', 'deps', 'acceptance', 'verification', 'permission', 'scope'],
+  required: ['key', 'title', 'objective', 'kind', 'category', 'complexity', 'criticality', 'deps', 'acceptance', 'verification', 'permission', 'scope', 'model'],
   properties: {
     key: { type: 'string', description: 'short unique slug, e.g. "lit-extract"' },
     title: { type: 'string', description: '≤ 6 words' },
@@ -17,6 +17,7 @@ const taskItem = {
     verification: { type: 'string', enum: ['none', 'review', 'crosscheck'], description: 'review = independent review; crosscheck = independent recomputation' },
     permission: { type: 'string', enum: ['read', 'write', 'execute', 'network'] },
     scope: { type: 'array', items: { type: 'string' }, description: 'files/dirs this task owns or reads; disjoint for write tasks' },
+    model: { type: 'string', description: 'empty = automatic routing (default). A model id from the list ONLY when the user asked for that model/provider for this kind of work' },
   },
 } as const;
 
@@ -75,6 +76,7 @@ export interface PlannedTask {
   verification: 'none' | 'review' | 'crosscheck';
   permission: PermissionLevel;
   scope: string[];
+  model?: string;
 }
 
 export interface Plan {
@@ -88,7 +90,7 @@ const UNTRUSTED_NOTE =
 
 export const SYSTEM_WORKER = `You are a specialist agent inside Synape, a multi-agent orchestration system. Work only on your assigned task, within your scope and permissions. Be precise and complete: preserve equations, units, assumptions, numbers and citations exactly; never invent references or results. If something cannot be established, say so explicitly. ${UNTRUSTED_NOTE}`;
 
-export const SYSTEM_PLANNER = `You are an orchestrator inside Synape. You decompose objectives into a small dependency graph of well-scoped tasks for specialist agents (Claude Code and Codex workers routed automatically by cost per verified result). ${UNTRUSTED_NOTE}`;
+export const SYSTEM_PLANNER = `You are an orchestrator inside Synape. You decompose objectives into a small dependency graph of well-scoped tasks for specialist agents (Claude Code, Codex and local-model workers, routed automatically by cost per verified result). ${UNTRUSTED_NOTE}`;
 
 export const SYSTEM_REVIEWER = `You are an independent reviewer inside Synape. You did not produce the work you are reviewing. Be skeptical and concrete: check the acceptance criteria, verify claims against the actual files and sources you can access, recompute key numbers when feasible. Do not rubber-stamp. Report disagreement and uncertainty honestly. ${UNTRUSTED_NOTE}`;
 
@@ -101,9 +103,23 @@ const PLANNING_RULES = `Planning rules:
 - verification: "review" or "crosscheck" for results others rely on (numbers, derivations, claims of novelty, code); "none" for routine extraction.
 - permission: the minimum needed. "read" for analysis; "write" to create/edit files; "execute" to run code/tests; "network" for web search.
 - A final synthesis task is added automatically; do not add one.
+- model: leave "" so the router picks the cheapest capable model. Set a model id only to honour an explicit user request (e.g. "use the local model / Qwen for the PDF reading" → that model on those tasks). Never pick an expensive model on your own.
+- Token economy: bulky, low-difficulty reading (PDFs, long files, extraction, summaries) should be its own complexity 1–2 task so it can run on the cheap/local model; keep hard reasoning in separate, smaller tasks.
 - It is acceptable for the outcome to be negative (e.g. "nothing new can be claimed"); plan to establish the truth, not to confirm a hoped-for result.`;
 
-export function planPrompt(opts: { objective: string; workspace: string; extraDirs: string[]; ceiling: PermissionLevel; parentContext?: string; depth: number; maxDepth: number }) {
+export interface MenuModel {
+  id: string;
+  label: string;
+  tier: number;
+  ru: number;
+}
+
+function modelList(models: MenuModel[] = []) {
+  if (!models.length) return '';
+  return `\nModels available for the "model" field (tier 1 light … 4 frontier; RU = relative quota cost per 1k tokens):\n${models.map((m) => `- ${m.id} — ${m.label} (tier ${m.tier}, ${m.ru} RU)`).join('\n')}\n`;
+}
+
+export function planPrompt(opts: { objective: string; workspace: string; extraDirs: string[]; ceiling: PermissionLevel; parentContext?: string; depth: number; maxDepth: number; models?: MenuModel[] }) {
   return `${opts.parentContext ? `You are a sub-orchestrator (depth ${opts.depth}) accountable to a parent orchestrator.\n\nParent context:\n<untrusted>\n${opts.parentContext}\n</untrusted>\n\n` : ''}Objective:
 <untrusted>
 ${opts.objective}
@@ -111,26 +127,34 @@ ${opts.objective}
 
 Workspace: ${opts.workspace}${opts.extraDirs.length ? `\nAlso readable: ${opts.extraDirs.join(', ')}` : ''}
 Permission ceiling without user approval: ${opts.ceiling}
-${opts.depth + 1 >= opts.maxDepth ? 'Delegation depth limit reached: use only kind "work".\n' : ''}
+${opts.depth + 1 >= opts.maxDepth ? 'Delegation depth limit reached: use only kind "work".\n' : ''}${modelList(opts.models)}
 ${PLANNING_RULES}
 
 Return the plan as structured output.`;
 }
 
-export function replanPrompt(state: RunState, instruction: string) {
+export function replanPrompt(state: RunState, instruction: string, models: MenuModel[] = []) {
+  // Archived tasks belong to finished chapters: they are summarised in run memory instead.
   const lines = Object.values(state.tasks)
-    .filter((t) => t.kind !== 'review')
+    .filter((t) => t.kind !== 'review' && !t.archived && t.id !== state.run.rootTaskId && t.mode !== 'replan')
     .map((t) => `- ${t.id} [${t.status}${t.verified ? ', verified' : ''}] ${t.title}${t.resultSummary ? ` — ${t.resultSummary.slice(0, 160)}` : ''}`);
-  return `You are the orchestrator of an ongoing run. The user sent a follow-up instruction. Decide how the task graph should change.
-
-Original objective:
+  const memory = state.run.memory
+    ? `Earlier missions in this run are finished and archived. What they established (read the listed reports only if this instruction needs the detail):
+<untrusted>
+${state.run.memory}
+</untrusted>
+`
+    : `Original objective:
 <untrusted>
 ${state.run.objective.slice(0, 1500)}
 </untrusted>
+`;
+  return `You are the orchestrator of an ongoing run. The user sent a follow-up instruction. Decide how the task graph should change.
 
+${memory}
 Current tasks:
-${lines.join('\n')}
-
+${lines.length ? lines.join('\n') : '(none: start fresh from the instruction, reusing earlier results where relevant)'}
+${modelList(models)}
 User instruction:
 <untrusted>
 ${instruction}

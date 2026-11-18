@@ -28,11 +28,12 @@ export function Fleet({ providers, onClose, onRefresh }: { providers?: Providers
               <span className="grow" />
               <span className="mono faint">{p.available ? p.auth : p.reason}</span>
               <span className="chip">{p.billing}</span>
+              {p.billing !== 'local' && <WeightInput provider={p.id} value={providers.models.find((m) => m.provider === p.id)?.quotaWeight ?? 1} onSaved={onRefresh} />}
             </div>
           ))}
         </div>
         <div className="eyebrow" style={{ margin: '16px 0 6px' }}>
-          Model catalog (cold-start priors; refined by local history). Untick models your plan doesn't include.
+          Model catalog (cold-start priors; refined by local history). Untick models your plan doesn't include. RU/1k includes the provider's quota weight (×, above).
         </div>
         <table className="cand">
           <thead>
@@ -111,6 +112,24 @@ export function Fleet({ providers, onClose, onRefresh }: { providers?: Providers
         </p>
       </div>
     </div>
+  );
+}
+
+/** Quota weight: how much one token from this provider "costs" relative to the catalog. */
+function WeightInput({ provider, value, onSaved }: { provider: string; value: number; onSaved: () => void }) {
+  const [v, setV] = useState(String(value));
+  useEffect(() => setV(String(value)), [value]);
+  const save = async () => {
+    const n = Number(v);
+    if (!(n >= 0.1 && n <= 20) || n === value) return setV(String(value));
+    await api.setProviderWeight(provider, n);
+    onSaved();
+  };
+  return (
+    <label className="row mono faint" style={{ gap: 4 }} title="Quota weight: multiplies this provider's RU per 1k tokens. Higher = the router avoids it unless it is really needed.">
+      ×
+      <input className="mono" style={{ width: 44 }} value={v} inputMode="decimal" aria-label={`Quota weight for ${provider}`} onChange={(e) => setV(e.target.value)} onBlur={save} onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()} />
+    </label>
   );
 }
 

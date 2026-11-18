@@ -349,6 +349,76 @@ describe('engine', () => {
     const s = await waitFor(engine, runId, (s) => s.run.status === 'completed' && Object.values(s.tasks).some((t) => t.title === 'Task extra' && t.status === 'completed') && Object.values(s.tasks).filter((t) => t.kind === 'synthesize').every((t) => t.status === 'completed'));
     expect(Object.values(s.tasks).filter((t) => t.kind === 'synthesize')).toHaveLength(2);
   });
+
+  it('a completed mission is archived into memory; the follow-up plans from the digest and can pin a model', async () => {
+    const replanPrompts: string[] = [];
+    const { engine } = setup((spec) => {
+      if (isPlan(spec)) return { structured: { summary: 'p', reply: 'ok', tasks: [plannedTask('first')] } };
+      if (spec.jsonSchema && 'cancel' in (spec.jsonSchema as any).properties) {
+        replanPrompts.push(spec.prompt);
+        return { structured: { reply: 'adding', add: [plannedTask('extra', { model: 'B mid' })], cancel: [] } };
+      }
+      if (isSynth(spec)) return { text: `## TL;DR\n- answer ${replanPrompts.length ? 'two' : 'one'}\n\n## Summary\nsynth` };
+      return { text: '## Summary\nfirst result: 42' };
+    });
+    await engine.init();
+    // Legacy allowlist without provider b: a pinned model is still honoured.
+    const runId = engine.createRun({ objective: 'mission one', workspace: process.cwd(), config: { providers: ['a'] } });
+    let s = await waitFor(engine, runId, (s) => s.run.status === 'completed' && s.run.chapter === 1);
+    const first = Object.values(s.tasks).find((t) => t.title === 'Task first')!;
+    expect(first.archived).toBe(true);
+    expect(s.tasks[s.run.rootTaskId!].archived).toBeFalsy();
+    expect(s.run.memory).toMatch(/Mission 1/);
+    expect(s.run.memory).toMatch(/answer one/);
+    expect(s.run.memory).toMatch(/Task first: first result: 42 \[report: /);
+
+    engine.postMessage(runId, 'now do the extra thing');
+    s = await waitFor(engine, runId, (s) => s.run.status === 'completed' && s.run.chapter === 2);
+    // The orchestrator saw the digest, not the old graph.
+    expect(replanPrompts[0]).toMatch(/Earlier missions in this run are finished/);
+    expect(replanPrompts[0]).not.toMatch(/\[completed[^\]]*\] Task first/);
+    expect(replanPrompts[0]).toMatch(/b:mid — B mid/);
+    const extra = Object.values(s.tasks).find((t) => t.title === 'Task extra')!;
+    expect(extra.pinnedModel).toBe('b:mid');
+    expect(s.agents[extra.agentIds[0]].provider).toBe('b');
+    // The new synthesis starts clean: it does not depend on the archived one.
+    const synths = Object.values(s.tasks).filter((t) => t.kind === 'synthesize');
+    const second = synths.find((t) => t.title === 'Final synthesis' && !t.deps.includes(first.id) && t.deps.includes(extra.id))!;
+    expect(second.deps.some((d) => synths.some((x) => x.id === d))).toBe(false);
+    expect(s.run.memory).toMatch(/Mission 2: now do the extra thing/);
+    expect(Object.values(s.tasks).filter((t) => !t.archived).map((t) => t.id)).toEqual([s.run.rootTaskId]);
+  });
+});
+
+describe('provider selection', () => {
+  const LOCAL: Omit<ModelProfile, 'available'> = { id: 'local:default', provider: 'local', model: 'local', label: 'Local', billing: 'local', tier: 1, contextWindow: 100000, skill: { analysis: 0.7, planning: 0.7, writing: 0.7 }, ruPer1kTokens: 0.08, latencyFactor: 1 };
+  function run(config: Record<string, unknown>) {
+    const dir = mkdtempSync(join(tmpdir(), 'synape-test-'));
+    const script: Script = (spec) => (isPlan(spec) ? { structured: { summary: 'p', reply: 'ok', tasks: [plannedTask('x', { complexity: 1, criticality: 1, verification: 'none' })] } } : { text: '## Summary\nok' });
+    const engine = new Engine({ store: new EventStore(join(dir, 'db.sqlite')), adapters: [new ScriptedAdapter('a', script), new ScriptedAdapter('local', script)], dataDir: dir, models: [...MODELS.filter((m) => m.provider === 'a'), LOCAL] });
+    return { engine, go: async () => (await engine.init(), engine.createRun({ objective: 'o', workspace: process.cwd(), config })) };
+  }
+  const workerProvider = (s: RunState) => s.agents[Object.values(s.tasks).find((t) => t.title === 'Task x')!.agentIds[0]].provider;
+
+  it('runs created with a provider list before the local model existed still use it', async () => {
+    const { engine, go } = run({ providers: ['a'] });
+    const runId = await go();
+    expect(workerProvider(await waitFor(engine, runId, done))).toBe('local');
+  });
+
+  it('a provider switched off for the run is never used', async () => {
+    const { engine, go } = run({ excludedProviders: ['local'] });
+    const runId = await go();
+    expect(workerProvider(await waitFor(engine, runId, done))).toBe('a');
+  });
+
+  it('a provider quota weight is applied to its models and persisted', async () => {
+    const { engine } = run({});
+    await engine.init();
+    engine.setProviderWeight('a', 4);
+    expect(engine.models.find((m) => m.id === 'a:light')!.ruPer1kTokens).toBe(4);
+    expect(() => engine.setProviderWeight('a', 0)).toThrow();
+  });
 });
 
 import { execFileSync } from 'node:child_process';

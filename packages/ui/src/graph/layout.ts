@@ -13,9 +13,10 @@ export const computeId = (taskId: string, program: string) => `cmp:${taskId}:${p
 const programsOf = (t: Task) => Object.keys(t.computes ?? {});
 
 /** Tasks visible given collapsed clusters. Reviews ride along with their target. */
-export function visibleTasks(s: RunState, collapsed: Set<string>): Task[] {
+/** Tasks to draw. Archived ones (finished earlier missions) only with `history`. */
+export function visibleTasks(s: RunState, collapsed: Set<string>, history = false): Task[] {
   const hidden = new Set<string>();
-  const all = Object.values(s.tasks);
+  const all = Object.values(s.tasks).filter((t) => history || !t.archived);
   const kids = new Map<string, Task[]>();
   for (const t of all) if (t.parentTaskId) kids.set(t.parentTaskId, [...(kids.get(t.parentTaskId) ?? []), t]);
   const hide = (id: string) => {

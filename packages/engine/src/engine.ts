@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import {
   BUILTIN_MODELS,
   DEFAULT_CONFIG,
+  DEFAULT_PROVIDER_WEIGHT,
   activeAgents,
   billableTokens,
   depsSatisfied,
@@ -119,7 +120,7 @@ export class Engine {
     return join(this.dataDir, 'settings.json');
   }
 
-  private readSettings(): { modelEnabled?: Record<string, boolean> } {
+  private readSettings(): { modelEnabled?: Record<string, boolean>; providerWeight?: Record<string, number> } {
     try {
       return JSON.parse(readFileSync(this.settingsPath, 'utf8'));
     } catch {
@@ -128,14 +129,32 @@ export class Engine {
   }
 
   private applyModelSettings() {
-    const overrides = this.readSettings().modelEnabled ?? {};
+    const st = this.readSettings();
+    const overrides = st.modelEnabled ?? {};
     this.models = this.catalog.map((m) => {
       const p = this.providers.get(m.provider);
       const disabled = !(overrides[m.id] ?? m.defaultEnabled ?? true);
       const available = !!p?.available && !disabled;
       const unavailableReason = !p?.available ? (p?.reason ?? 'no adapter') : disabled ? 'disabled in Fleet' : undefined;
-      return { ...m, disabled, available, unavailableReason };
+      const quotaWeight = this.providerWeight(m.provider, st.providerWeight);
+      return { ...m, ruPer1kTokens: +(m.ruPer1kTokens * quotaWeight).toFixed(3), quotaWeight, disabled, available, unavailableReason };
     });
+  }
+
+  private providerWeight(provider: string, saved?: Record<string, number>) {
+    const w = saved?.[provider] ?? DEFAULT_PROVIDER_WEIGHT[provider] ?? 1;
+    return Number.isFinite(w) && w > 0 ? w : 1;
+  }
+
+  /** Quota-pressure multiplier for a provider's models (persisted). */
+  setProviderWeight(provider: string, weight: number) {
+    if (!this.catalog.some((m) => m.provider === provider)) throw new Error(`unknown provider ${provider}`);
+    if (!(weight >= 0.1 && weight <= 20)) throw new Error('weight must be between 0.1 and 20');
+    const st = this.readSettings();
+    st.providerWeight = { ...st.providerWeight, [provider]: weight };
+    mkdirSync(this.dataDir, { recursive: true });
+    writeFileSync(this.settingsPath, JSON.stringify(st, null, 2));
+    this.applyModelSettings();
   }
 
   /** Turn a model on or off for routing (persisted across restarts). */
@@ -403,7 +422,7 @@ export class Engine {
   ): string | null {
     const s = this.state(runId);
     const lim = s.run.config.limits;
-    const count = Object.keys(s.tasks).length;
+    const count = Object.values(s.tasks).filter((t) => !t.archived).length;
     const structural = spec.kind === 'review' || spec.kind === 'synthesize' || spec.kind === 'plan';
     if (!structural && count >= lim.maxTasks) {
       this.emit(runId, { type: 'limit.hit', limit: 'maxTasks', detail: `Refused task "${spec.title}": run already has ${count} tasks (max ${lim.maxTasks})` });
@@ -412,7 +431,7 @@ export class Engine {
     if (!structural) {
       // Duplicate-work prevention: near-identical live objective in the same run.
       for (const t of Object.values(s.tasks)) {
-        if (t.kind === 'review' || t.kind === 'synthesize' || t.kind === 'plan' || t.status === 'cancelled' || t.id === rel.parentTaskId) continue;
+        if (t.kind === 'review' || t.kind === 'synthesize' || t.kind === 'plan' || t.status === 'cancelled' || t.archived || t.id === rel.parentTaskId) continue;
         if (similarity(t.objective, spec.objective) > 0.85) {
           this.emit(runId, { type: 'duplicate.rejected', title: spec.title, existingTaskId: t.id });
           return t.id;
@@ -460,12 +479,16 @@ export class Engine {
       if (tid) {
         keyToId.set(p.key, tid);
         created.push(tid);
+        // The orchestrator relays an explicit user request for a model ("use Qwen for the PDFs").
+        const made = this.state(runId).tasks[tid];
+        const pin = this.resolveModel(this.state(runId), p.model);
+        if (pin && made?.createdBy === agentId && !made.pinnedModel) this.emit(runId, { type: 'task.model', taskId: tid, modelId: pin });
       }
     }
     if (!created.length) return created;
     // Fan-in: latest synthesis for this parent depends on all children.
     const s2 = this.state(runId);
-    const synths = Object.values(s2.tasks).filter((t) => t.parentTaskId === parent.id && t.kind === 'synthesize');
+    const synths = Object.values(s2.tasks).filter((t) => t.parentTaskId === parent.id && t.kind === 'synthesize' && !t.archived);
     const live = synths.find((t) => t.status === 'pending' || t.status === 'ready');
     if (live) {
       this.emit(runId, { type: 'task.deps', taskId: live.id, deps: [...new Set([...live.deps, ...created])] });
@@ -545,6 +568,7 @@ export class Engine {
           this.emit(runId, { type: 'chat.message', messageId: id('msg'), from: 'orchestrator', text: `Run complete.\n\n${root.resultTldr ? `**TL;DR**\n${root.resultTldr}` : (root.resultSummary ?? '')}${final ? `\n\nFull report: ${final.path}` : ''}`, refs: [root.id] });
         }
         this.emit(runId, { type: 'run.status', status, reason: root.statusReason });
+        if (status === 'completed') this.compact(runId);
       }
       return;
     }
@@ -572,7 +596,7 @@ export class Engine {
     let localQueued = 0;
     for (const t of ready) {
       if (activeAgents(s).length >= lim.maxConcurrentAgents) break;
-      const totalAgents = Object.values(s.agents).filter((a) => a.status !== 'interrupted').length;
+      const totalAgents = Object.values(s.agents).filter((a) => a.status !== 'interrupted' && !s.tasks[a.taskId]?.archived).length;
       if (totalAgents >= lim.maxTotalAgents) {
         this.emit(runId, { type: 'limit.hit', limit: 'maxTotalAgents', detail: `${totalAgents} agents spawned (max ${lim.maxTotalAgents})`, taskId: t.id }, { dedupeKey: `maxTotal:${t.id}` });
         this.emit(runId, { type: 'task.status', taskId: t.id, status: 'failed', reason: 'agent spawn limit reached' });
@@ -658,11 +682,55 @@ export class Engine {
       stats: (m, c) => this.store.perfStats(m, c),
       saturated,
       quotaUtilization,
-      allowedProviders: excludeProviders.length ? (s.run.config.providers ?? [...this.providers.keys()]).filter((p) => !excludeProviders.includes(p)) : s.run.config.providers,
+      allowedProviders: this.allowedProviders(s).filter((p) => !excludeProviders.includes(p)),
       maxRetries: s.run.config.limits.maxRetries,
       qualityBias: s.run.config.qualityBias,
       authorModelId,
     });
+  }
+
+  /** Providers this run may route to. */
+  private allowedProviders(s: RunState): string[] {
+    const c = s.run.config;
+    let ps = [...this.providers.keys()];
+    // Legacy allowlist: snapshot of what was available when the run was created.
+    // The local model is always admitted (no quota cost; it may postdate the run).
+    if (c.providers) ps = ps.filter((p) => c.providers!.includes(p) || p === 'local');
+    return ps.filter((p) => !c.excludedProviders?.includes(p));
+  }
+
+  /**
+   * What the run is working on now. After a completed mission the original
+   * objective is history: the live goal is the follow-up instruction(s) of the
+   * current chapter, with the run memory as background.
+   */
+  private currentObjective(s: RunState): string {
+    if (!s.run.memory) return s.run.objective;
+    const asks = Object.values(s.tasks)
+      .filter((t) => t.mode === 'replan' && !t.archived)
+      .map((t) => t.objective);
+    return `${asks.length ? asks.join('\n\n') : s.run.objective}\n\nBackground from earlier missions in this run:\n${s.run.memory.slice(0, 2500)}`;
+  }
+
+  /** Resolve the orchestrator's "model" field to an available model id. */
+  private resolveModel(s: RunState, name?: string): string | undefined {
+    const q = String(name ?? '').trim().toLowerCase();
+    if (!q || q === 'auto') return undefined;
+    const menu = this.modelMenu(s);
+    return (
+      menu.find((m) => m.id.toLowerCase() === q)?.id ??
+      menu.find((m) => m.label.toLowerCase().includes(q) || m.id.toLowerCase().includes(q))?.id ??
+      (/\b(local|qwen|llama)\b/.test(q) ? menu.find((m) => m.id.startsWith('local:'))?.id : undefined)
+    );
+  }
+
+  /**
+   * Models the orchestrator may name for a task (shown in planning prompts).
+   * Every available model: naming one relays an explicit user request, which
+   * overrides the run's provider selection just as a pin from the UI does.
+   */
+  private modelMenu(_s: RunState) {
+    return this.models.filter((m) => m.available).map((m) => ({ id: m.id, label: m.label, tier: m.tier, ru: m.ruPer1kTokens }));
   }
 
   private roleFor(t: Task): AgentRole {
@@ -924,13 +992,13 @@ export class Engine {
     const parent = t.parentTaskId ? s.tasks[t.parentTaskId] : undefined;
     switch (t.kind) {
       case 'plan':
-        if (t.mode === 'replan') return { prompt: replanPrompt(s, t.objective), system: SYSTEM_PLANNER, schema: REPLAN_SCHEMA, depCount: 0 };
-        return { prompt: planPrompt({ objective: t.objective, workspace: cwd, extraDirs: run.config.extraDirs, ceiling: run.config.permissionCeiling, depth: t.depth, maxDepth: run.config.limits.maxDepth }), system: SYSTEM_PLANNER, schema: PLAN_SCHEMA, depCount: 0 };
+        if (t.mode === 'replan') return { prompt: replanPrompt(s, t.objective, this.modelMenu(s)), system: SYSTEM_PLANNER, schema: REPLAN_SCHEMA, depCount: 0 };
+        return { prompt: planPrompt({ objective: t.objective, workspace: cwd, extraDirs: run.config.extraDirs, ceiling: run.config.permissionCeiling, depth: t.depth, maxDepth: run.config.limits.maxDepth, models: this.modelMenu(s) }), system: SYSTEM_PLANNER, schema: PLAN_SCHEMA, depCount: 0 };
       case 'orchestrate': {
         const deps = this.depContext(runId, t);
-        const parentContext = `Run objective: ${run.objective.slice(0, 600)}\n${deps.map((d) => `Input "${d.title}": ${d.summary.slice(0, 600)} (${d.artifactPaths.join(', ')})`).join('\n')}`;
+        const parentContext = `Run objective: ${this.currentObjective(s).slice(0, 900)}\n${deps.map((d) => `Input "${d.title}": ${d.summary.slice(0, 600)} (${d.artifactPaths.join(', ')})`).join('\n')}`;
         const objective = `${t.title}\n${t.objective}\nAcceptance:\n${t.acceptance.map((a) => `- ${a}`).join('\n')}`;
-        return { prompt: planPrompt({ objective, workspace: cwd, extraDirs: run.config.extraDirs, ceiling: run.config.permissionCeiling, parentContext, depth: t.depth, maxDepth: run.config.limits.maxDepth }), system: SYSTEM_PLANNER, schema: PLAN_SCHEMA, depCount: deps.length };
+        return { prompt: planPrompt({ objective, workspace: cwd, extraDirs: run.config.extraDirs, ceiling: run.config.permissionCeiling, parentContext, depth: t.depth, maxDepth: run.config.limits.maxDepth, models: this.modelMenu(s) }), system: SYSTEM_PLANNER, schema: PLAN_SCHEMA, depCount: deps.length };
       }
       case 'review': {
         const target = s.tasks[t.reviewOf!];
@@ -955,12 +1023,14 @@ export class Engine {
           reviews: x.reviewIds.map((r) => s.reviews[r]).filter(Boolean).map((r) => `${r.verdict} (${r.confidence.toFixed(2)}): ${r.summary.slice(0, 300)}`).join(' | '),
           artifactPaths: x.artifactIds.map((a) => s.artifacts[a]?.path).filter(Boolean) as string[],
         }));
-        return { prompt: synthesisPrompt({ objective: parent?.objective ?? run.objective, parts, isRoot: !parent?.parentTaskId }), system: SYSTEM_WORKER, depCount: parts.length };
+        const isRoot = !parent?.parentTaskId;
+        const objective = isRoot && run.memory ? this.currentObjective(s) : (parent?.objective ?? run.objective);
+        return { prompt: synthesisPrompt({ objective, parts, isRoot }), system: SYSTEM_WORKER, depCount: parts.length };
       }
       default: {
         const deps = this.depContext(runId, t);
         const lim = run.config.limits;
-        const canDelegate = t.depth < lim.maxDepth && Object.keys(s.tasks).length < lim.maxTasks - 3;
+        const canDelegate = t.depth < lim.maxDepth && Object.values(s.tasks).filter((x) => !x.archived).length < lim.maxTasks - 3;
         return {
           prompt: workPrompt({ task: t, runObjective: run.objective, parentObjective: parent?.kind === 'orchestrate' ? parent.objective : undefined, deps, workspace: cwd, originalWorkspace: run.workspace, canDelegate, reportPath: '' }),
           system: SYSTEM_WORKER,
@@ -1132,7 +1202,7 @@ export class Engine {
     if (del) {
       this.emit(runId, { type: 'delegation.requested', agentId, taskId: t.id, reason: del.reason, subtasks: del.tasks.length });
       const depthOk = t.depth < lim.maxDepth;
-      const room = Object.keys(s.tasks).length + del.tasks.length + 1 <= lim.maxTasks;
+      const room = Object.values(s.tasks).filter((x) => !x.archived).length + del.tasks.length + 1 <= lim.maxTasks;
       const approved = depthOk && room && del.tasks.length >= 2;
       const why = !depthOk ? `max delegation depth ${lim.maxDepth} reached` : !room ? `would exceed max ${lim.maxTasks} tasks` : del.tasks.length < 2 ? 'fewer than 2 sub-tasks: do it directly' : 'within limits';
       this.emit(runId, { type: 'delegation.decided', agentId, taskId: t.id, approved, reason: why });
@@ -1258,6 +1328,47 @@ export class Engine {
       this.emit(runId, { type: 'task.result', taskId: target.id, summary: `${target.resultSummary ?? ''}\n\n⚠ UNRESOLVED REVIEW DISAGREEMENT (${v.verdict}): ${v.summary}`, verified: false });
       this.emit(runId, { type: 'task.status', taskId: target.id, status: 'completed', reason: 'completed UNVERIFIED: reviewer disagreement unresolved after max retries' });
     }
+  }
+
+  // ================================================================ chapters
+
+  /**
+   * Close a finished mission: fold its results into run memory and archive its
+   * finished nodes, leaving only the orchestrator. A follow-up then plans from
+   * the memory digest (and can open the reports it lists) instead of dragging
+   * the whole old graph through every prompt.
+   */
+  private compact(runId: string) {
+    const s = this.state(runId);
+    const root = s.run.rootTaskId ? s.tasks[s.run.rootTaskId] : undefined;
+    if (!root) return;
+    const done = Object.values(s.tasks).filter((t) => t.id !== root.id && !t.archived && isTerminal(t));
+    if (!done.length) return;
+    const chapter = (s.run.chapter ?? 0) + 1;
+    const final = s.run.finalArtifactId ? s.artifacts[s.run.finalArtifactId] : undefined;
+    const asks = done.filter((t) => t.mode === 'replan').map((t) => t.objective.slice(0, 300));
+    const results = done
+      .filter((t) => (t.kind === 'work' || t.kind === 'orchestrate') && t.status === 'completed')
+      .slice(-25)
+      .map((t) => {
+        const report = t.artifactIds.map((a) => s.artifacts[a]).filter((a) => a?.kind === 'report').at(-1);
+        const files = (t.outputs ?? []).slice(0, 4).map((o) => o.rel);
+        return `- ${t.title}${t.verified ? ' (verified)' : ''}: ${(t.resultSummary ?? '').replace(/\s+/g, ' ').slice(0, 220)}${report ? ` [report: ${report.path}]` : ''}${files.length ? ` [files: ${files.join(', ')}]` : ''}`;
+      });
+    const failed = done.filter((t) => t.kind === 'work' && t.status !== 'completed').map((t) => `- ${t.title}: ${t.status}${t.statusReason ? ` (${t.statusReason.slice(0, 120)})` : ''}`);
+    const entry = [
+      `## Mission ${chapter}: ${(asks.at(-1) ?? s.run.objective).replace(/\s+/g, ' ').slice(0, 300)}`,
+      root.resultTldr ? `TL;DR:\n${root.resultTldr.slice(0, 1500)}` : `Summary: ${(root.resultSummary ?? '').slice(0, 1500)}`,
+      final ? `Final report: ${final.path}` : '',
+      results.length ? `Results:\n${results.join('\n')}` : '',
+      failed.length ? `Not completed:\n${failed.join('\n')}` : '',
+    ]
+      .filter(Boolean)
+      .join('\n');
+    // Keep the digest bounded: newest missions in full, older ones trimmed from the front.
+    let memory = s.run.memory ? `${s.run.memory}\n\n${entry}` : entry;
+    if (memory.length > 12_000) memory = `…(older missions trimmed)\n${memory.slice(-12_000)}`;
+    this.emit(runId, { type: 'run.compacted', chapter, memory, archived: done.map((t) => t.id) });
   }
 
   // ================================================================ chat

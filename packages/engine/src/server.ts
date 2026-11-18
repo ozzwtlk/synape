@@ -212,6 +212,15 @@ export function startServer(opts: ServerOptions) {
         }
         return json(res, 200, { ok: true });
       }
+      if (path === '/api/provider-weight' && method === 'POST') {
+        const b = await readBody(req);
+        try {
+          engine.setProviderWeight(String(b.provider), Number(b.weight));
+        } catch (e) {
+          return json(res, 400, { error: (e as Error).message });
+        }
+        return json(res, 200, { ok: true });
+      }
       if ((r = m(/^\/api\/runs\/([\w-]+)\/approvals\/([\w-]+)$/)) && method === 'POST') {
         const b = await readBody(req);
         engine.resolveApproval(r[1], r[2], !!b.approved, b.note);
