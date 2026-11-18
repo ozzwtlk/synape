@@ -119,6 +119,8 @@ export interface ChatEndpoint {
   explainFailure?: () => Promise<string>;
   /** Classify a failed request (default: provider error unless it is a context overflow). */
   classify?: (e: Error) => ErrorClass;
+  /** Keep PDF contents away from this endpoint (no pdf_text; read_file already refuses PDFs). */
+  noPdf?: boolean;
   /** Called with response headers of each completion (e.g. to read which upstream served it). */
   onHeaders?: (h: Record<string, string | string[] | undefined>) => string | undefined;
 }
@@ -146,7 +148,7 @@ export async function* runChatAgent(spec: AgentRunSpec, ep: ChatEndpoint): Async
   messages.push({ role: 'user', content: spec.prompt });
   const save = () => writeFileSync(join(sessionDir, `${sessionId}.json`), JSON.stringify(messages));
   yield { kind: 'session', sessionId };
-  const tools = TOOLS.filter((t) => permissionRank(spec.permission) >= permissionRank(t.min));
+  const tools = TOOLS.filter((t) => permissionRank(spec.permission) >= permissionRank(t.min) && !(ep.noPdf && t.name === 'pdf_text'));
   yield { kind: 'system', text: `${ep.label} ${ep.model} · tools ${tools.map((t) => t.name).join(', ')} · ctx ${ctx.toLocaleString()}` };
 
   const usage: Usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costBasis: 'unavailable', contextWindow: ctx, peakContextTokens: 0 };
@@ -182,7 +184,7 @@ export async function* runChatAgent(spec: AgentRunSpec, ep: ChatEndpoint): Async
     }
     for (const call of res.toolCalls) {
       yield { kind: 'tool_start', id: call.id, name: call.function.name, input: clip(call.function.arguments, 600) };
-      const out = await runTool(call, tools, spec, roots, signal);
+      const out = await runTool(call, tools, spec, roots, signal, !!ep.noPdf);
       yield { kind: 'tool_end', id: call.id, ok: out.ok, output: clip(out.text, 800) };
       messages.push({ role: 'tool', tool_call_id: call.id, content: clip(out.text, TOOL_OUTPUT_CHARS) });
     }
@@ -362,8 +364,11 @@ export function confine(p: string | undefined, cwd: string, roots: string[], wri
   return r;
 }
 
-async function runTool(call: ToolCall, tools: ToolDef[], spec: AgentRunSpec, roots: string[], signal: AbortSignal): Promise<{ ok: boolean; text: string }> {
+const PDF_LOCAL = 'PDF contents stay on the local model and are not available here. Rely on digests from earlier tasks, or list the PDF (path and what to look for) under Sources for the later model.';
+
+async function runTool(call: ToolCall, tools: ToolDef[], spec: AgentRunSpec, roots: string[], signal: AbortSignal, noPdf = false): Promise<{ ok: boolean; text: string }> {
   const name = call.function.name;
+  if (noPdf && name === 'pdf_text') return { ok: false, text: PDF_LOCAL };
   if (!tools.some((t) => t.name === name)) return { ok: false, text: `tool "${name}" is not available at permission "${spec.permission}"` };
   let a: any;
   try {
@@ -390,7 +395,7 @@ async function runTool(call: ToolCall, tools: ToolDef[], spec: AgentRunSpec, roo
       case 'read_file': {
         const p = confine(a.path, spec.cwd, roots);
         if (statSync(p).size > 50 * 1024 * 1024) return { ok: false, text: 'file too large; use grep to locate content' };
-        if (/\.pdf$/i.test(p)) return { ok: false, text: 'this is a PDF: use pdf_text' };
+        if (/\.pdf$/i.test(p)) return { ok: false, text: noPdf ? PDF_LOCAL : 'this is a PDF: use pdf_text' };
         const all = readFileSync(p, 'utf8').split('\n');
         const off = Math.max(1, a.offset ?? 1);
         const lim = Math.min(2000, Math.max(1, a.limit ?? 2000));

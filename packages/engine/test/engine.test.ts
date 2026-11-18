@@ -484,6 +484,25 @@ describe('provider selection', () => {
     expect(workerProvider(await waitFor(engine, runId, done))).toBe('a');
   });
 
+  it('PDF reading goes to the local model even when the router alone would pick a cloud model', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'synape-test-'));
+    const WEAK_LOCAL = { ...LOCAL, skill: { analysis: 0.3, extraction: 0.3, planning: 0.3, writing: 0.3 } };
+    const script: Script = (spec) =>
+      isPlan(spec)
+        ? { structured: { summary: 'p', reply: 'ok', tasks: [plannedTask('digest', { objective: 'Digest papers/main.pdf with page citations', category: 'analysis', complexity: 3 }), plannedTask('derive', { category: 'analysis', complexity: 3 })] } }
+        : { text: '## Summary\nok' };
+    const engine = new Engine({ store: new EventStore(join(dir, 'db.sqlite')), adapters: [new ScriptedAdapter('a', script), new ScriptedAdapter('local', script)], dataDir: dir, models: [...MODELS.filter((m) => m.provider === 'a'), WEAK_LOCAL] });
+    await engine.init();
+    const runId = engine.createRun({ objective: 'o', workspace: process.cwd() });
+    const s = await waitFor(engine, runId, done);
+    const by = (title: string) => {
+      const t = Object.values(s.tasks).find((x) => x.title === title)!;
+      return { provider: s.agents[t.agentIds[0]].provider, why: t.routing?.explanation ?? '' };
+    };
+    expect(by('Task digest')).toMatchObject({ provider: 'local', why: expect.stringMatching(/PDF work stays on the local model/) });
+    expect(by('Task derive').provider).toBe('a');
+  });
+
   it('a provider quota weight is applied to its models and persisted', async () => {
     const { engine } = run({});
     await engine.init();

@@ -96,6 +96,8 @@ The server listens on all interfaces, but answers only loopback, private LAN (10
 
 Synape can run agents on a local model served by [llama.cpp](https://github.com/ggml-org/llama.cpp). It starts `llama-server` the first time a task is routed to it, and stops it after 20 idle minutes to free the VRAM. It takes the bulky, low-difficulty work (PDF digests, extraction, summaries and simple edits), the same tier the router would give Haiku. Its tokens don't count against run budgets, and its results are still reviewed by a cloud model of another family.
 
+**PDFs are the local model's job.** A work task that reads PDFs goes to the local model, even when another model would be cheaper on paper. That covers extraction at any difficulty, and analysis, research or writing up to complexity 3. These tasks wait in the local queue instead of spilling over to the cloud. The orchestrator is told to plan PDF reading as its own digest task, with page citations, that later tasks depend on. Harder reasoning over that material then reads the digest, not the PDF.
+
 **Default model.** [Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) is an Apache-2.0 hybrid-attention MoE (35B total, 3B active, 262,144-token context). Qwen reports 73.4 on SWE-bench Verified for it, against about 73 for Claude Haiku 4.5. That makes it Haiku-class for agentic work, though weaker on hard reasoning. The default build is Unsloth's `UD-Q4_K_XL` with the multi-token-prediction head (22.9 GB).
 
 **Tuned for one 16 GB GPU and 32 GB of RAM.** The adapter launches llama-server with:
@@ -174,7 +176,9 @@ curl -fsSL https://freellmapi.co/install.sh | bash   # or: docker compose, see i
 
 Environment overrides: `SYNAPE_FREELLM_URL`, `SYNAPE_FREELLM_KEY`, `SYNAPE_FREELLM_MODEL`, `SYNAPE_FREELLM_ENABLED=0`.
 
-Mind what you send: the prompts and the files these agents read go to third-party free tiers, which may log or train on them. Each upstream's terms apply. Switch pre-work off in Fleet, or exclude `freellm` from a mission, for work that must stay private.
+PDFs never go to free models. Pre-work agents have no PDF tool and `read_file` refuses PDFs, so they rely on the local model's digests.
+
+Mind what you send: the prompts and the other files these agents read go to third-party free tiers, which may log or train on them. Each upstream's terms apply. Switch pre-work off in Fleet, or exclude `freellm` from a mission, for work that must stay private.
 
 ## Configuration
 

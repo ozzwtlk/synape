@@ -74,6 +74,8 @@ const id = (p: string) => `${p}_${randomUUID().replace(/-/g, '').slice(0, 10)}`;
 
 /** Ready tasks allowed to wait for the (serialized) local model before overflowing to the cloud. */
 const LOCAL_QUEUE = 2;
+/** Tasks that read PDFs (by objective or scope). */
+const PDF_RE = /\.pdf\b|\bpdfs?\b/i;
 /** Most pre-work agents alive at once in a run (free tiers have tight per-minute limits). */
 const MAX_PREWORK = 6;
 /** A task whose pre-work is still running waits this long for it after quota returns. */
@@ -704,7 +706,8 @@ export class Engine {
       const busyOf = (p: string) => [...this.running.values()].filter((r) => r.provider === p).length;
       if (busyOf(decision.provider) >= capOf(decision.provider)) {
         // A short queue for the local model is worth it (no quota spent); a long one is not.
-        if (decision.provider !== 'local' || t.pinnedModel || ++localQueued <= LOCAL_QUEUE) continue;
+        // PDF work waits for the local model rather than sending PDFs to the cloud.
+        if (decision.provider !== 'local' || t.pinnedModel || this.pdfLocal(s, t) || ++localQueued <= LOCAL_QUEUE) continue;
         try {
           decision = this.routeTask(s, t, ['local']);
         } catch {
@@ -802,8 +805,10 @@ export class Engine {
       const authorAgent = target ? s.agents[target.agentIds.at(-1)!] : undefined;
       authorModelId = authorAgent?.modelId;
     }
-    const task = t.kind === 'review' ? { ...t, category: 'review' as const } : t;
-    return route(task, {
+    let task: Task = t.kind === 'review' ? { ...t, category: 'review' as const } : t;
+    const pdf = this.pdfLocal(s, t, excludeProviders);
+    if (pdf) task = { ...task, pinnedModel: pdf };
+    const d = route(task, {
       models: this.models,
       stats: (m, c) => this.store.perfStats(m, c),
       saturated,
@@ -813,6 +818,21 @@ export class Engine {
       qualityBias: s.run.config.qualityBias,
       authorModelId,
     });
+    if (pdf) d.explanation = d.explanation.replace('model chosen by user (routing bypassed)', 'PDF work stays on the local model');
+    return d;
+  }
+
+  /**
+   * PDF reading and digesting runs on the local model: it is token-heavy,
+   * within the local model's ability, and keeps PDF contents on this machine.
+   * Returns the local model id when this task should go there.
+   */
+  private pdfLocal(s: RunState, t: Task, excludeProviders: string[] = []): string | undefined {
+    if (t.kind !== 'work' || t.pinnedModel || t.preworkFor || excludeProviders.includes('local')) return undefined;
+    if (!PDF_RE.test(`${t.objective}\n${(t.scope ?? []).join('\n')}`)) return undefined;
+    const fits = t.category === 'extraction' || (['analysis', 'research', 'writing'].includes(t.category) && t.complexity <= 3);
+    if (!fits || !this.allowedProviders(s).includes('local')) return undefined;
+    return this.models.find((m) => m.provider === 'local' && m.available)?.id;
   }
 
   /**
